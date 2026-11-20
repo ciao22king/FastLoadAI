@@ -10,9 +10,9 @@ Richiede Git, curl e Python 3.10 o successivo. Dopo che il repository è stato p
 curl -fsSL https://raw.githubusercontent.com/ciao22king/FastLoadAI/main/install.sh | sh
 ```
 
-Lo script crea un virtualenv isolato in `~/.local/share/fastloadai-venv`, installa il supporto Hugging Face e crea il comando `fastloadai` in `~/.local/bin`. Se `~/.local/bin` non è nel `PATH`, aggiungilo come indicato dall'installer.
+Lo script crea un virtualenv isolato in `~/.local/share/fastloadai-venv`, installa `huggingface_hub`, scarica i binari CPU ufficiali di `llama.cpp` (server, CLI e quantizzatore) e crea i comandi in `~/.local/bin`. Supporta Linux e macOS su x86_64 e ARM64. Se `~/.local/bin` non è nel `PATH`, aggiungilo come indicato dall'installer.
 
-Installa anche `llama.cpp` con il server e rendi disponibili nel `PATH` i binari `llama-server` e, per la quantizzazione, `llama-quantize`. FastLoadAI non compila `llama.cpp` automaticamente.
+L'installer non compila `llama.cpp` e non richiede `sudo`; installa una build CPU. Per GPU o build personalizzate installa una build adatta manualmente.
 
 ## Uso
 
