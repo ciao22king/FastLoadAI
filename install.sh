@@ -23,9 +23,12 @@ if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
 fi
 
 if [ -d "$INSTALL_DIR/.git" ]; then
+    if [ -n "$(git -C "$INSTALL_DIR" status --porcelain)" ]; then
+        printf 'Errore: %s contiene modifiche locali; non le sovrascrivo.\n' "$INSTALL_DIR" >&2
+        exit 1
+    fi
     git -C "$INSTALL_DIR" fetch --depth 1 origin "$REF"
-    git -C "$INSTALL_DIR" checkout "$REF"
-    git -C "$INSTALL_DIR" merge --ff-only FETCH_HEAD
+    git -C "$INSTALL_DIR" checkout -B "$REF" FETCH_HEAD
 elif [ -e "$INSTALL_DIR" ]; then
     printf 'Errore: %s esiste e non è un clone FastLoadAI; non lo sovrascrivo.\n' "$INSTALL_DIR" >&2
     exit 1
