@@ -1,12 +1,28 @@
 import argparse
+import io
 import json
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from fastloadai.cli import _plan_command, _run_command, _select_gguf, build_parser
-from fastloadai.hardware import HardwareSpecs, recommend_settings, usable_model_memory_gb
+from fastloadai.chat import trim_history
+from fastloadai.cli import (
+    _doctor_command,
+    _models_command,
+    _plan_command,
+    _quant_label,
+    _run_command,
+    _select_gguf,
+    build_parser,
+)
+from fastloadai.hardware import (
+    HardwareSpecs,
+    recommend_settings,
+    recommended_context_size,
+    usable_model_memory_gb,
+)
 
 
 class HardwareRecommendationTests(unittest.TestCase):
@@ -46,9 +62,62 @@ class HardwareRecommendationTests(unittest.TestCase):
             Sibling("model-F16.gguf", 12 * 1024**3),
         ]
 
-        selected = _select_gguf(siblings, 6, None)
+        selected = _select_gguf(siblings, 6, None, prefer="quality")
 
         self.assertEqual(selected["name"], "model-Q5_K_M.gguf")
+
+    def test_gguf_selection_balanced_prefers_smaller_high_quality_quant(self):
+        class Sibling:
+            def __init__(self, filename, size):
+                self.rfilename = filename
+                self.size = size
+
+        siblings = [
+            Sibling("model-Q4_K_M.gguf", 4 * 1024**3),
+            Sibling("model-Q5_K_M.gguf", 5 * 1024**3),
+            Sibling("model-Q8_0.gguf", 8 * 1024**3),
+        ]
+
+        selected = _select_gguf(siblings, 16, None)
+
+        self.assertEqual(selected["name"], "model-Q4_K_M.gguf")
+
+    def test_gguf_selection_speed_prefers_q4(self):
+        class Sibling:
+            def __init__(self, filename, size):
+                self.rfilename = filename
+                self.size = size
+
+        siblings = [
+            Sibling("model-Q2_K.gguf", 2 * 1024**3),
+            Sibling("model-Q4_K_M.gguf", 4 * 1024**3),
+            Sibling("model-Q8_0.gguf", 8 * 1024**3),
+        ]
+
+        selected = _select_gguf(siblings, 16, None, prefer="speed")
+
+        self.assertEqual(selected["name"], "model-Q4_K_M.gguf")
+
+    def test_gguf_selection_prefers_k_quant_over_legacy(self):
+        class Sibling:
+            def __init__(self, filename, size):
+                self.rfilename = filename
+                self.size = size
+
+        siblings = [
+            Sibling("model-Q4_0.gguf", 400 * 1024**2),
+            Sibling("model-Q4_K_M.gguf", 460 * 1024**2),
+        ]
+
+        selected = _select_gguf(siblings, 16, None)
+
+        self.assertEqual(selected["name"], "model-Q4_K_M.gguf")
+
+    def test_context_grows_when_model_leaves_memory_headroom(self):
+        specs = HardwareSpecs(cpu_threads=4, ram_gb=16)
+
+        self.assertEqual(recommended_context_size(specs), 4096)
+        self.assertEqual(recommended_context_size(specs, 0.6), 8192)
 
     def test_gguf_selection_uses_smallest_file_when_none_fit(self):
         class Sibling:
@@ -112,7 +181,7 @@ class HardwareRecommendationTests(unittest.TestCase):
 
         class FakeResponse:
             lines = [
-                b'data: {"choices":[{"delta":{"content":"Ciao"}}]}\n',
+                b'data: {"choices":[{"delta":{"content":"Hello"}}]}\n',
                 b'data: {"choices":[{"delta":{"content":"!"}}]}\n',
                 b"data: [DONE]\n",
             ]
@@ -127,9 +196,9 @@ class HardwareRecommendationTests(unittest.TestCase):
                 return iter(self.lines)
 
         with patch("fastloadai.chat.urlopen", return_value=FakeResponse()):
-            chunks = list(stream_chat("http://127.0.0.1:8080", [{"role": "user", "content": "Ciao"}]))
+            chunks = list(stream_chat("http://127.0.0.1:8080", [{"role": "user", "content": "Hello"}]))
 
-        self.assertEqual(chunks, ["Ciao", "!"])
+        self.assertEqual(chunks, ["Hello", "!"])
 
     def test_plan_command_generates_config_for_model(self):
         specs = HardwareSpecs(cpu_threads=4, ram_gb=8)
@@ -145,6 +214,54 @@ class HardwareRecommendationTests(unittest.TestCase):
 
             config = json.loads(output_path.read_text(encoding="utf-8"))
             self.assertEqual(config["model_path"], str(model_path.resolve()))
+
+
+    def test_quant_label_extracts_short_name(self):
+        self.assertEqual(_quant_label("qwen2.5-0.5b-instruct-q8_0.gguf"), "Q8_0")
+        self.assertEqual(_quant_label("model-IQ4_XS.gguf"), "IQ4_XS")
+
+    def test_models_command_groups_shards_and_reports_json(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "small-Q4_K_M.gguf").write_bytes(b"x" * 2048)
+            (root / "big-00001-of-00002.gguf").write_bytes(b"y" * 1024)
+            (root / "big-00002-of-00002.gguf").write_bytes(b"y" * 1024)
+            args = argparse.Namespace(models_dir=root, json=True)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(_models_command(args), 0)
+
+            payload = json.loads(output.getvalue())
+            entries = {entry["name"]: entry for entry in payload}
+            self.assertEqual(entries["big.gguf"]["size_bytes"], 2048)
+            self.assertEqual(entries["small-Q4_K_M.gguf"]["quantization"], "Q4_K_M")
+
+    def test_doctor_reports_missing_server(self):
+        with TemporaryDirectory() as directory:
+            config = Path(directory) / "config.json"
+            config.write_text(json.dumps({"model_path": str(config)}), encoding="utf-8")
+            args = argparse.Namespace(config=config)
+
+            with patch("fastloadai.cli.shutil.which", return_value=None):
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    self.assertEqual(_doctor_command(args), 1)
+
+            self.assertIn("missing", output.getvalue())
+
+    def test_trim_history_drops_old_pairs_but_keeps_recent(self):
+        messages = [
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": "x" * 400},
+            {"role": "assistant", "content": "y" * 400},
+            {"role": "user", "content": "recent"},
+        ]
+
+        trim_history(messages, 50)
+
+        self.assertEqual(len(messages), 2)
+        self.assertEqual(messages[-1]["content"], "recent")
 
 
 if __name__ == "__main__":

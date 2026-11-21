@@ -68,17 +68,36 @@ def usable_model_memory_gb(specs: HardwareSpecs) -> float:
     return round(ram_budget + vram_budget, 2)
 
 
+def recommended_context_size(specs: HardwareSpecs, model_size_gb: float = 0.0) -> int:
+    """Pick the largest safe context, doubling it when the model leaves headroom."""
+    if specs.ram_gb >= 24:
+        context_size = 8192
+    elif specs.ram_gb >= 12:
+        context_size = 4096
+    elif specs.ram_gb >= 8:
+        context_size = 2048
+    else:
+        context_size = 1024
+
+    if model_size_gb >= 0.1:
+        headroom = usable_model_memory_gb(specs) - model_size_gb
+        if headroom >= 4.0 and context_size < 8192:
+            context_size *= 2
+    return context_size
+
+
 def recommend_settings(
     specs: HardwareSpecs,
     model_path: str | Path | None = None,
     model_size_bytes: int | None = None,
 ) -> dict[str, object]:
-    context_size = 4096 if specs.ram_gb >= 16 else 2048 if specs.ram_gb >= 8 else 1024
     model_size_gb = model_size_bytes / (1024**3) if model_size_bytes else 0.0
     if model_size_gb == 0.0 and model_path:
         path = Path(model_path)
         if path.is_file():
             model_size_gb = path.stat().st_size / (1024**3)
+
+    context_size = recommended_context_size(specs, model_size_gb)
 
     gpu_layers = 0
     if (

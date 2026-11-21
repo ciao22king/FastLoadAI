@@ -11,8 +11,20 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from . import __version__
 from .chat import run_chat
 from .hardware import detect_hardware, recommend_settings, usable_model_memory_gb
+from .tui import (
+    GREEN,
+    RED,
+    YELLOW,
+    Theme,
+    color_enabled,
+    format_size,
+    render_hardware,
+    render_kv,
+    render_plan,
+)
 
 DEFAULT_CONFIG = Path("fastloadai-config.json")
 QUANT_RANK = {
@@ -39,8 +51,33 @@ def _write_config(path: Path, config: dict[str, Any]) -> None:
 def _quant_rank(filename: str) -> int:
     upper_name = filename.upper()
     for token, rank in QUANT_RANK.items():
-        if re.search(rf"(?<![A-Z0-9]){token}(?:_[A-Z0-9]+)?", upper_name):
+        if re.search(rf"(?<![A-Z0-9]){token}(?:_[A-Z0-9]+)*", upper_name):
             return rank
+    return 0
+
+
+def _quant_label(filename: str) -> str:
+    """Extract a short label such as ``Q4_K_M`` from a GGUF filename."""
+    upper_name = filename.upper()
+    for token in QUANT_RANK:
+        match = re.search(rf"(?<![A-Z0-9]){token}(?:_[A-Z0-9]+)*", upper_name)
+        if match:
+            return match.group(0)
+    return Path(filename).stem
+
+
+PREFER_TARGET = {"speed": 40, "balanced": 45, "quality": 80}
+
+
+def _quant_finesse(filename: str) -> int:
+    """Prefer K-quants over legacy quants with the same nominal size."""
+    upper_name = filename.upper()
+    if "_K_M" in upper_name:
+        return 3
+    if "_K_S" in upper_name:
+        return 2
+    if re.search(r"_K(?![A-Z0-9])", upper_name):
+        return 1
     return 0
 
 
@@ -66,7 +103,12 @@ def _gguf_groups(siblings: list[Any]) -> list[dict[str, Any]]:
     return list(groups.values())
 
 
-def _select_gguf(siblings: list[Any], budget_gb: float, requested_file: str | None) -> dict[str, Any]:
+def _select_gguf(
+    siblings: list[Any],
+    budget_gb: float,
+    requested_file: str | None,
+    prefer: str = "balanced",
+) -> dict[str, Any]:
     groups = _gguf_groups(siblings)
     if requested_file:
         selected = next(
@@ -74,10 +116,10 @@ def _select_gguf(siblings: list[Any], budget_gb: float, requested_file: str | No
             None,
         )
         if selected is None:
-            raise ValueError(f"File GGUF non trovato nel repository: {requested_file}")
+            raise ValueError(f"GGUF file not found in repository: {requested_file}")
         return selected
     if not groups:
-        raise ValueError("Il repository Hugging Face non contiene file GGUF.")
+        raise ValueError("The Hugging Face repository does not contain any GGUF files.")
 
     fitting = [
         group
@@ -85,7 +127,15 @@ def _select_gguf(siblings: list[Any], budget_gb: float, requested_file: str | No
         if group["size_known"] and group["size"] <= budget_gb * (1024**3)
     ]
     if fitting:
-        return max(fitting, key=lambda group: _quant_rank(group["name"]))
+        target = PREFER_TARGET.get(prefer, PREFER_TARGET["balanced"])
+        return min(
+            fitting,
+            key=lambda group: (
+                abs(_quant_rank(group["name"]) - target),
+                -_quant_finesse(group["name"]),
+                group["size"],
+            ),
+        )
 
     known_sizes = [group for group in groups if group["size_known"]]
     if known_sizes:
@@ -101,8 +151,7 @@ def _plan_command(args: argparse.Namespace) -> int:
     config = recommend_settings(specs, model_path)
     config["model_path"] = str(model_path.resolve()) if model_path else None
     _write_config(args.output, config)
-    print(json.dumps(config, indent=2))
-    print(f"Configurazione salvata in {args.output}")
+    print(render_plan(config, str(args.output), Theme(color_enabled())))
     return 0
 
 
@@ -110,7 +159,7 @@ def _download_command(args: argparse.Namespace) -> int:
     try:
         from huggingface_hub import HfApi, hf_hub_download
     except ImportError:
-        print("Installa il supporto Hugging Face con: pip install 'fastloadai[huggingface]'", file=sys.stderr)
+        print("Install Hugging Face support with: pip install fastloadai[huggingface]", file=sys.stderr)
         return 2
 
     specs = detect_hardware()
@@ -120,9 +169,10 @@ def _download_command(args: argparse.Namespace) -> int:
             model_info.siblings,
             usable_model_memory_gb(specs),
             args.file,
+            prefer=getattr(args, "prefer", "balanced"),
         )
         if selected["size_known"] and selected["size"] > usable_model_memory_gb(specs) * (1024**3):
-            print("Avviso: nessuna quantizzazione rientra nella memoria stimata; scarico il file richiesto/piu adatto.", file=sys.stderr)
+            print("Warning: no quantization fits the estimated memory; downloading the requested or closest file.", file=sys.stderr)
 
         model_paths = [
             hf_hub_download(
@@ -134,25 +184,38 @@ def _download_command(args: argparse.Namespace) -> int:
             for filename in sorted(selected["files"])
         ]
     except Exception as error:
-        print(f"Download non riuscito: {error}", file=sys.stderr)
+        print(f"Download failed: {error}", file=sys.stderr)
         return 1
 
     model_path = Path(model_paths[0])
     model_size_bytes = selected["size"] if selected["size_known"] else None
+    quant_label = _quant_label(selected["name"])
     config = recommend_settings(specs, model_path, model_size_bytes=model_size_bytes)
     config.update(
         {
             "model_path": str(model_path.resolve()),
             "model_repo": args.repo,
-            "quantization": selected["name"],
+            "quantization": quant_label,
+            "quantization_file": selected["name"],
             "model_size_bytes": model_size_bytes,
-            "llama_cpp_moe": "Dipende dal supporto dell'architettura nella build llama.cpp installata.",
+            "llama_cpp_moe": "Depends on architecture support in the installed llama.cpp build.",
         }
     )
     _write_config(args.output, config)
-    print(f"Modello: {model_path}")
-    print(f"Quantizzazione: {selected['name']}")
-    print(f"Configurazione per questo PC: {args.output}")
+    print(
+        render_kv(
+            "Model ready",
+            [
+                ("Model", str(model_path)),
+                ("Quantization", quant_label),
+                ("File", selected["name"]),
+                ("Context", str(config["context_size"])),
+                ("Threads", str(config["cpu_threads"])),
+                ("Config file", str(args.output)),
+            ],
+            Theme(color_enabled()),
+        )
+    )
     return 0
 
 
@@ -166,7 +229,7 @@ def _resolve_run_model(
 
     if not requested_model:
         if configured_path is None:
-            raise ValueError("Nessun modello configurato: specifica un modello o esegui prima download.")
+            raise ValueError("No model configured: specify a model or run download first.")
         return configured_path
 
     requested_path = Path(requested_model).expanduser()
@@ -202,8 +265,8 @@ def _resolve_run_model(
         return next(iter(grouped.values())).resolve()
     if len(grouped) > 1:
         choices = "\n".join(f"  {path}" for path in sorted(grouped.values()))
-        raise ValueError(f"Nome modello ambiguo. Scegli un file GGUF preciso:\n{choices}")
-    raise ValueError(f"Modello '{requested_model}' non trovato nel config o in {models_dir}.")
+        raise ValueError(f"Ambiguous model name. Choose one of these GGUF files: {choices}")
+    raise ValueError(f"Model '{requested_model}' was not found in the config or in {models_dir}.")
 
 
 def _run_command(args: argparse.Namespace) -> int:
@@ -212,13 +275,13 @@ def _run_command(args: argparse.Namespace) -> int:
         if args.config.is_file():
             loaded_config = json.loads(args.config.read_text(encoding="utf-8"))
             if not isinstance(loaded_config, dict):
-                raise ValueError("Il file di configurazione deve contenere un oggetto JSON.")
+                raise ValueError("The config file must contain a JSON object.")
             config = loaded_config
         model_path = _resolve_run_model(args.model, config, args.models_dir)
         if not model_path.is_file():
-            raise ValueError(f"File modello non trovato: {model_path}")
+            raise ValueError(f"Model file not found: {model_path}")
     except (OSError, json.JSONDecodeError, ValueError) as error:
-        print(f"Configurazione non valida: {error}", file=sys.stderr)
+        print(f"Invalid configuration: {error}", file=sys.stderr)
         return 2
 
     specs = detect_hardware()
@@ -231,19 +294,145 @@ def _run_command(args: argparse.Namespace) -> int:
     config.update(
         recommend_settings(specs, model_path, model_size_bytes=model_size_bytes)
     )
+    if str(config.get("quantization", "")).lower().endswith(".gguf"):
+        config["quantization"] = _quant_label(str(config["quantization"]))
+    overrides = {
+        "cpu_threads": getattr(args, "threads", None),
+        "context_size": getattr(args, "ctx_size", None),
+        "n_gpu_layers": getattr(args, "gpu_layers", None),
+    }
+    config.update({key: value for key, value in overrides.items() if value is not None})
+    for key, minimum in (("cpu_threads", 1), ("context_size", 256), ("n_gpu_layers", 0)):
+        if isinstance(config.get(key), int):
+            config[key] = max(minimum, int(config[key]))
     config["model_path"] = str(model_path.resolve())
     _write_config(args.config, config)
 
-    return run_chat(model_path, config, args.prompt)
+    return run_chat(
+        model_path,
+        config,
+        getattr(args, "prompt", None),
+        color=False if getattr(args, "no_color", False) else None,
+        temperature=getattr(args, "temperature", 0.7),
+        max_tokens=getattr(args, "max_tokens", None),
+        system_prompt=getattr(args, "system", None),
+        once=getattr(args, "once", False),
+    )
+
+
+def _models_command(args: argparse.Namespace) -> int:
+    root = args.models_dir
+    if not root.is_dir():
+        print(f"No models directory at {root}. Run download first.", file=sys.stderr)
+        return 1
+
+    groups: dict[str, dict[str, Any]] = {}
+    shard_pattern = re.compile(r"-\d{5}-of-\d{5}(?=\.gguf$)", re.IGNORECASE)
+    for path in sorted(root.rglob("*.gguf")):
+        group_name = shard_pattern.sub("", path.name)
+        entry = groups.setdefault(group_name, {"path": path, "size": 0})
+        try:
+            entry["size"] += path.stat().st_size
+        except OSError:
+            pass
+
+    if not groups:
+        print(f"No GGUF files found in {root}.")
+        return 0
+
+    theme = Theme(color_enabled())
+    if getattr(args, "json", False):
+        payload = [
+            {
+                "name": name,
+                "path": str(entry["path"]),
+                "size_bytes": entry["size"],
+                "quantization": _quant_label(name),
+            }
+            for name, entry in sorted(groups.items())
+        ]
+        print(json.dumps(payload, indent=2))
+        return 0
+
+    rows = [
+        (
+            str(entry["path"].relative_to(root)),
+            f"{_quant_label(name)} · {format_size(entry['size'] / (1024**3))}",
+        )
+        for name, entry in sorted(groups.items())
+    ]
+    print(render_kv("Local models", rows, theme))
+    return 0
+
+
+def _doctor_command(args: argparse.Namespace) -> int:
+    theme = Theme(color_enabled())
+    rows: list[tuple[str, str]] = []
+    healthy = True
+
+    version = sys.version.split()[0]
+    python_ok = sys.version_info >= (3, 10)
+    rows.append(("Python", f"{version} {theme.paint('ok', GREEN) if python_ok else theme.paint('need 3.10+', RED)}"))
+    healthy = healthy and python_ok
+
+    server = shutil.which("llama-server")
+    rows.append(
+        (
+            "llama-server",
+            server if server else theme.paint("missing - install llama.cpp", RED),
+        )
+    )
+    healthy = healthy and bool(server)
+
+    quantizer = shutil.which("llama-quantize")
+    rows.append(
+        (
+            "llama-quantize",
+            quantizer if quantizer else theme.paint("optional, missing", YELLOW),
+        )
+    )
+
+    try:
+        import huggingface_hub
+
+        hub_status = f"{huggingface_hub.__version__} {theme.paint('ok', GREEN)}"
+    except ImportError:
+        hub_status = theme.paint("optional, install fastloadai[huggingface]", YELLOW)
+    rows.append(("Hugging Face", hub_status))
+
+    config: dict[str, Any] = {}
+    if args.config.is_file():
+        try:
+            loaded = json.loads(args.config.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                config = loaded
+            rows.append(("Config", f"{args.config} {theme.paint('ok', GREEN)}"))
+        except (OSError, json.JSONDecodeError) as error:
+            rows.append(("Config", f"{args.config} {theme.paint(str(error), RED)}"))
+            healthy = False
+    else:
+        rows.append(("Config", theme.paint("not found - run download or plan", YELLOW)))
+
+    model_value = config.get("model_path")
+    if model_value:
+        model_path = Path(str(model_value)).expanduser()
+        if model_path.is_file():
+            rows.append(("Model", f"{model_path} {theme.paint('ok', GREEN)}"))
+        else:
+            rows.append(("Model", f"{model_path} {theme.paint('missing', RED)}"))
+            healthy = False
+
+    print(render_kv("Environment check", rows, theme))
+    return 0 if healthy else 1
 
 
 def _quantize_command(args: argparse.Namespace) -> int:
     if not args.model.is_file():
-        print(f"File modello non trovato: {args.model}", file=sys.stderr)
+        print(f"Model file not found: {args.model}", file=sys.stderr)
         return 2
     executable = shutil.which("llama-quantize")
     if not executable:
-        print("llama-quantize non trovato. Installa una build di llama.cpp con gli strumenti inclusi.", file=sys.stderr)
+        print("llama-quantize not found. Install a llama.cpp build that includes the CLI tools.", file=sys.stderr)
         return 2
     try:
         return subprocess.run(
@@ -251,37 +440,59 @@ def _quantize_command(args: argparse.Namespace) -> int:
             check=False,
         ).returncode
     except OSError as error:
-        print(f"Impossibile avviare llama-quantize: {error}", file=sys.stderr)
+        print(f"Could not start llama-quantize: {error}", file=sys.stderr)
         return 1
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="fastloadai", description="Prepara modelli GGUF per l'hardware locale.")
+    parser = argparse.ArgumentParser(prog="fastloadai", description="Prepare GGUF models for your local hardware.")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     commands = parser.add_subparsers(dest="command", required=True)
+    scan = commands.add_parser("scan", help="Show detected hardware specs.")
+    scan.add_argument("--json", action="store_true", help="Print raw JSON instead of a table.")
 
-    commands.add_parser("scan", help="Mostra le specifiche hardware rilevate.")
-
-    plan = commands.add_parser("plan", help="Crea una configurazione runtime per questo PC.")
-    plan.add_argument("model", nargs="?", help="Percorso di un file GGUF locale.")
+    plan = commands.add_parser("plan", help="Build a runtime config for this machine.")
+    plan.add_argument("model", nargs="?", help="Path to a local GGUF file.")
     plan.add_argument("--output", type=Path, default=DEFAULT_CONFIG)
 
-    download = commands.add_parser("download", help="Scarica una quantizzazione GGUF da Hugging Face.")
-    download.add_argument("repo", help="ID del repository, ad esempio organizzazione/modello-GGUF.")
-    download.add_argument("--file", help="File GGUF o shard da selezionare esplicitamente.")
+    download = commands.add_parser("download", help="Download a GGUF quantization from Hugging Face.")
+    download.add_argument("repo", help="Repository ID, for example org/model-GGUF.")
+    download.add_argument("--file", help="Explicit GGUF file or shard to download.")
     download.add_argument("--directory", type=Path, default=Path("models"))
     download.add_argument("--output", type=Path, default=DEFAULT_CONFIG)
-    download.add_argument("--token", help="Token Hugging Face per repository gated o privati.")
+    download.add_argument("--token", help="Hugging Face token for gated or private repositories.")
+    download.add_argument(
+        "--prefer",
+        choices=("speed", "balanced", "quality"),
+        default="balanced",
+        help="Quantization trade-off when several files fit. Default: balanced.",
+    )
 
-    run = commands.add_parser("run", help="Applica la configurazione hardware e apre una chat interattiva.")
-    run.add_argument("model", nargs="?", help="Nome del modello scaricato o percorso di un file GGUF.")
+    models = commands.add_parser("models", help="List downloaded GGUF models.")
+    models.add_argument("--models-dir", type=Path, default=Path("models"))
+    models.add_argument("--json", action="store_true", help="Print raw JSON instead of a table.")
+
+    doctor = commands.add_parser("doctor", help="Check the local runtime and configuration.")
+    doctor.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+
+    run = commands.add_parser("run", help="Apply the hardware plan and open an interactive chat.")
+    run.add_argument("model", nargs="?", help="Downloaded model name or path to a GGUF file.")
     run.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     run.add_argument("--models-dir", type=Path, default=Path("models"))
-    run.add_argument("--prompt")
+    run.add_argument("--prompt", help="Send one message before the interactive prompt.")
+    run.add_argument("--once", action="store_true", help="Answer the prompt and exit.")
+    run.add_argument("--threads", type=int, help="Override CPU threads.")
+    run.add_argument("--ctx-size", type=int, help="Override the context window.")
+    run.add_argument("--gpu-layers", type=int, help="Override GPU layers (0 keeps CPU only).")
+    run.add_argument("--temperature", type=float, default=0.7, help="Sampling temperature. Default: 0.7.")
+    run.add_argument("--max-tokens", type=int, help="Maximum tokens per answer.")
+    run.add_argument("--system", help="Replace the default system prompt.")
+    run.add_argument("--no-color", action="store_true", help="Disable colored output.")
 
-    quantize = commands.add_parser("quantize", help="Quantizza un GGUF locale con llama-quantize.")
+    quantize = commands.add_parser("quantize", help="Quantize a local GGUF with llama-quantize.")
     quantize.add_argument("model", type=Path)
     quantize.add_argument("output", type=Path)
-    quantize.add_argument("--type", default="Q4_K_M", help="Tipo llama.cpp, ad esempio Q4_K_M o Q5_K_M.")
+    quantize.add_argument("--type", default="Q4_K_M", help="llama.cpp type, for example Q4_K_M or Q5_K_M.")
     return parser
 
 
@@ -289,17 +500,25 @@ def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
     if args.command == "scan":
-        print(json.dumps(detect_hardware().__dict__, indent=2))
+        specs = detect_hardware()
+        if getattr(args, "json", False):
+            print(json.dumps(specs.__dict__, indent=2))
+        else:
+            print(render_hardware(specs, Theme(color_enabled())))
         return 0
     if args.command == "plan":
         return _plan_command(args)
     if args.command == "download":
         return _download_command(args)
+    if args.command == "models":
+        return _models_command(args)
+    if args.command == "doctor":
+        return _doctor_command(args)
     if args.command == "run":
         return _run_command(args)
     if args.command == "quantize":
         return _quantize_command(args)
-    parser.error("Comando sconosciuto")
+    parser.error("Unknown command")
     return 2
 
 

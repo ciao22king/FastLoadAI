@@ -10,27 +10,27 @@ LLAMA_ROOT=${FASTLOADAI_LLAMA_HOME:-"$HOME/.local/share/fastloadai-llama"}
 PYTHON_BIN=${PYTHON:-python3}
 
 if ! command -v git >/dev/null 2>&1; then
-    printf '%s\n' "Errore: git non è installato." >&2
+    printf '%s\n' "Error: git is not installed." >&2
     exit 1
 fi
 if ! command -v curl >/dev/null 2>&1; then
-    printf '%s\n' "Errore: curl non è installato." >&2
+    printf '%s\n' "Error: curl is not installed." >&2
     exit 1
 fi
 if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
-    printf '%s\n' "Errore: Python 3 non è installato o PYTHON non è valido." >&2
+    printf '%s\n' "Error: Python 3 is not installed or PYTHON is invalid." >&2
     exit 1
 fi
 
 if [ -d "$INSTALL_DIR/.git" ]; then
     if [ -n "$(git -C "$INSTALL_DIR" status --porcelain)" ]; then
-        printf 'Errore: %s contiene modifiche locali; non le sovrascrivo.\n' "$INSTALL_DIR" >&2
+        printf 'Error: %s has local changes; refusing to overwrite them.\n' "$INSTALL_DIR" >&2
         exit 1
     fi
     git -C "$INSTALL_DIR" fetch --depth 1 origin "$REF"
     git -C "$INSTALL_DIR" checkout -B "$REF" FETCH_HEAD
 elif [ -e "$INSTALL_DIR" ]; then
-    printf 'Errore: %s esiste e non è un clone FastLoadAI; non lo sovrascrivo.\n' "$INSTALL_DIR" >&2
+    printf 'Error: %s exists and is not a FastLoadAI clone; refusing to overwrite it.\n' "$INSTALL_DIR" >&2
     exit 1
 else
     mkdir -p "$(dirname "$INSTALL_DIR")"
@@ -46,7 +46,7 @@ fi
 
 mkdir -p "$BIN_DIR"
 if [ -e "$BIN_DIR/fastloadai" ] && [ ! -L "$BIN_DIR/fastloadai" ]; then
-    printf 'Errore: %s esiste già e non è un link simbolico; non lo sovrascrivo.\n' "$BIN_DIR/fastloadai" >&2
+    printf 'Error: %s already exists and is not a symlink; refusing to overwrite it.\n' "$BIN_DIR/fastloadai" >&2
     exit 1
 fi
 ln -sfn "$VENV_DIR/bin/fastloadai" "$BIN_DIR/fastloadai"
@@ -56,7 +56,7 @@ if ! command -v llama-server >/dev/null 2>&1 || ! command -v llama-quantize >/de
         Linux) LLAMA_PLATFORM=ubuntu ;;
         Darwin) LLAMA_PLATFORM=macos ;;
         *)
-            printf 'Errore: installazione automatica di llama.cpp non supportata su %s.\n' "$(uname -s)" >&2
+            printf 'Error: automatic llama.cpp installation is not supported on %s.\n' "$(uname -s)" >&2
             exit 1
             ;;
     esac
@@ -65,7 +65,7 @@ if ! command -v llama-server >/dev/null 2>&1 || ! command -v llama-quantize >/de
         x86_64|amd64) LLAMA_ARCH=x64 ;;
         aarch64|arm64) LLAMA_ARCH=arm64 ;;
         *)
-            printf 'Errore: architettura non supportata da llama.cpp: %s.\n' "$(uname -m)" >&2
+            printf 'Error: architecture not supported by llama.cpp: %s.\n' "$(uname -m)" >&2
             exit 1
             ;;
     esac
@@ -83,25 +83,25 @@ for release in json.load(sys.stdin):
             raise SystemExit(0)
 ' "$LLAMA_SUFFIX")
     if [ -z "$LLAMA_ASSET_URL" ]; then
-        printf 'Errore: nessun binario llama.cpp trovato per %s/%s.\n' "$LLAMA_PLATFORM" "$LLAMA_ARCH" >&2
+        printf 'Error: no llama.cpp binary found for %s/%s.\n' "$LLAMA_PLATFORM" "$LLAMA_ARCH" >&2
         exit 1
     fi
 
     TMP_DIR=$(mktemp -d)
     trap 'rm -rf "$TMP_DIR"' 0
-    printf 'Scarico il runtime CPU di llama.cpp per %s/%s...\n' "$LLAMA_PLATFORM" "$LLAMA_ARCH"
+    printf 'Downloading the llama.cpp CPU runtime for %s/%s...\n' "$LLAMA_PLATFORM" "$LLAMA_ARCH"
     if ! curl -fL --retry 2 -o "$TMP_DIR/llama.cpp.tar.gz" "$LLAMA_ASSET_URL"; then
-        printf '%s\n' "Errore: download del runtime llama.cpp non riuscito." >&2
+        printf '%s\n' "Error: llama.cpp runtime download failed." >&2
         exit 1
     fi
     if ! tar -xzf "$TMP_DIR/llama.cpp.tar.gz" -C "$TMP_DIR"; then
-        printf '%s\n' "Errore: archivio llama.cpp non valido." >&2
+        printf '%s\n' "Error: invalid llama.cpp archive." >&2
         exit 1
     fi
 
     LLAMA_SERVER_PATH=$(find "$TMP_DIR" -type f -name llama-server -print -quit)
     if [ -z "$LLAMA_SERVER_PATH" ]; then
-        printf '%s\n' "Errore: llama-server non trovato nel pacchetto ufficiale." >&2
+        printf '%s\n' "Error: llama-server not found in the official package." >&2
         exit 1
     fi
     LLAMA_SOURCE_DIR=$(dirname "$LLAMA_SERVER_PATH")
@@ -114,7 +114,7 @@ for release in json.load(sys.stdin):
     for TOOL in llama-server llama-cli llama-quantize; do
         if ! command -v "$TOOL" >/dev/null 2>&1 && [ -x "$LLAMA_BUILD_DIR/$TOOL" ]; then
             if [ -e "$BIN_DIR/$TOOL" ] && [ ! -L "$BIN_DIR/$TOOL" ]; then
-                printf 'Errore: %s esiste già e non è un link simbolico; non lo sovrascrivo.\n' "$BIN_DIR/$TOOL" >&2
+                printf 'Error: %s already exists and is not a symlink; refusing to overwrite it.\n' "$BIN_DIR/$TOOL" >&2
                 exit 1
             fi
             ln -sfn "$LLAMA_BUILD_DIR/$TOOL" "$BIN_DIR/$TOOL"
@@ -122,12 +122,12 @@ for release in json.load(sys.stdin):
     done
 fi
 
-printf '\nFastLoadAI installato. Avvia con: fastloadai --help\n'
+printf '\nFastLoadAI installed. Start with: fastloadai --help\n'
 case ":${PATH:-}:" in
     *":$BIN_DIR:"*) ;;
-    *) printf 'Aggiungi al PATH: export PATH="%s:$PATH"\n' "$BIN_DIR" ;;
+    *) printf 'Add to PATH: export PATH="%s:$PATH"\n' "$BIN_DIR" ;;
 esac
 if ! command -v llama-server >/dev/null 2>&1; then
-    printf '%s\n' "Errore: llama-server non è stato installato o non è nel PATH." >&2
+    printf '%s\n' "Error: llama-server was not installed or is not on PATH." >&2
     exit 1
 fi
