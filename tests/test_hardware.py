@@ -15,6 +15,7 @@ from fastloadai.cli import (
     _doctor_command,
     _download_command,
     _hf_token,
+    _is_repo_reference,
     _models_command,
     _plan_command,
     _quant_label,
@@ -185,6 +186,105 @@ class HardwareRecommendationTests(unittest.TestCase):
             updated_config = json.loads(config_path.read_text(encoding="utf-8"))
             self.assertEqual(updated_config["context_size"], 4096)
             self.assertEqual(updated_config["model_repo"], "test-org/test-model-GGUF")
+
+    def test_run_without_config_auto_downloads_the_recommendation(self):
+        specs = HardwareSpecs(cpu_threads=4, ram_gb=4, available_ram_gb=3.5)
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            models_dir = root / "models"
+            config_path = root / "fastloadai-config.json"
+            model_path = models_dir / "auto-Q4_K_M.gguf"
+            args = build_parser().parse_args(
+                [
+                    "run",
+                    "--config",
+                    str(config_path),
+                    "--models-dir",
+                    str(models_dir),
+                    "--once",
+                    "--prompt",
+                    "hi",
+                ]
+            )
+
+            def fake_download(run_args, repo):
+                model_path.parent.mkdir(parents=True, exist_ok=True)
+                model_path.write_bytes(b"gguf")
+                config_path.write_text(
+                    json.dumps(
+                        {
+                            "model_path": str(model_path),
+                            "model_repo": repo,
+                            "model_size_bytes": 4,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                return 0
+
+            with (
+                patch("fastloadai.cli.detect_hardware", return_value=specs),
+                patch("fastloadai.cli._download_for_run", side_effect=fake_download) as download,
+                patch("fastloadai.cli.shutil.which", return_value="/usr/bin/llama-server"),
+                patch("fastloadai.cli.run_chat", return_value=0) as run_chat,
+            ):
+                self.assertEqual(_run_command(args), 0)
+
+            self.assertEqual(
+                download.call_args.args[1], "Qwen/Qwen2.5-1.5B-Instruct-GGUF"
+            )
+            self.assertEqual(run_chat.call_args.args[0], model_path.resolve())
+
+    def test_run_with_repo_id_auto_downloads_that_repository(self):
+        specs = HardwareSpecs(cpu_threads=4, ram_gb=8, available_ram_gb=6)
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            models_dir = root / "models"
+            config_path = root / "fastloadai-config.json"
+            model_path = models_dir / "repo-Q4_K_M.gguf"
+            args = build_parser().parse_args(
+                [
+                    "run",
+                    "org/model-GGUF",
+                    "--config",
+                    str(config_path),
+                    "--models-dir",
+                    str(models_dir),
+                    "--once",
+                    "--prompt",
+                    "hi",
+                ]
+            )
+
+            def fake_download(run_args, repo):
+                model_path.parent.mkdir(parents=True, exist_ok=True)
+                model_path.write_bytes(b"gguf")
+                config_path.write_text(
+                    json.dumps(
+                        {
+                            "model_path": str(model_path),
+                            "model_repo": repo,
+                            "model_size_bytes": 4,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                return 0
+
+            with (
+                patch("fastloadai.cli.detect_hardware", return_value=specs),
+                patch("fastloadai.cli._download_for_run", side_effect=fake_download) as download,
+                patch("fastloadai.cli.shutil.which", return_value="/usr/bin/llama-server"),
+                patch("fastloadai.cli.run_chat", return_value=0),
+            ):
+                self.assertEqual(_run_command(args), 0)
+
+            self.assertEqual(download.call_args.args[1], "org/model-GGUF")
+
+    def test_repo_references_are_distinguished_from_local_models(self):
+        self.assertTrue(_is_repo_reference("org/model-GGUF"))
+        self.assertFalse(_is_repo_reference("model-Q4_K_M.gguf"))
+        self.assertFalse(_is_repo_reference("test-model"))
 
     def test_chat_streams_openai_compatible_response(self):
         from fastloadai.chat import stream_chat

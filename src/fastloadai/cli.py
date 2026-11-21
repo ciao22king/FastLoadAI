@@ -323,6 +323,27 @@ def _download_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _is_repo_reference(value: str) -> bool:
+    if not value or Path(value).exists() or value.lower().endswith(".gguf"):
+        return False
+    return "/" in value
+
+
+def _download_for_run(args: argparse.Namespace, repo: str) -> int:
+    download_args = argparse.Namespace(
+        repo=repo,
+        file=None,
+        directory=args.models_dir,
+        output=args.config,
+        token=getattr(args, "token", None),
+        revision=getattr(args, "revision", None),
+        dry_run=False,
+        force=getattr(args, "force", False),
+        prefer=getattr(args, "prefer", "balanced"),
+    )
+    return _download_command(download_args)
+
+
 def _resolve_run_model(
     requested_model: str | None,
     config: dict[str, Any],
@@ -381,7 +402,60 @@ def _run_command(args: argparse.Namespace) -> int:
             if not isinstance(loaded_config, dict):
                 raise ValueError("The config file must contain a JSON object.")
             config = loaded_config
-        model_path = _resolve_run_model(args.model, config, args.models_dir)
+
+        requested_model = args.model
+        if requested_model and _is_repo_reference(requested_model):
+            if not shutil.which("llama-server"):
+                print(
+                    "llama-server not found. Install llama.cpp before running a model.",
+                    file=sys.stderr,
+                )
+                return 2
+            print(f"Preparing {requested_model} for this machine...")
+            code = _download_for_run(args, requested_model)
+            if code:
+                return code
+            config = json.loads(args.config.read_text(encoding="utf-8"))
+            requested_model = None
+        elif not requested_model:
+            configured_value = config.get("model_path")
+            configured_path = (
+                Path(configured_value).expanduser() if configured_value else None
+            )
+            if configured_path is None or not configured_path.is_file():
+                repo = str(config.get("model_repo") or "")
+                if repo:
+                    print(f"Model file is missing. Downloading {repo} again.")
+                else:
+                    specs_for_choice = detect_hardware()
+                    rows = catalog_rows(specs_for_choice)
+                    recommended = next(
+                        (row for row in rows if row["recommended"]), None
+                    )
+                    if recommended is None:
+                        print(
+                            "No model configured and no catalog model fits this machine. "
+                            "Use fastloadai download --force or pass a local GGUF file.",
+                            file=sys.stderr,
+                        )
+                        return 2
+                    repo = str(recommended["repo"])
+                    print(
+                        f"No model configured. Selected {recommended['name']} "
+                        f"for a {format_size(catalog_budget(specs_for_choice))} budget."
+                    )
+                if not shutil.which("llama-server"):
+                    print(
+                        "llama-server not found. Install llama.cpp before running a model.",
+                        file=sys.stderr,
+                    )
+                    return 2
+                code = _download_for_run(args, repo)
+                if code:
+                    return code
+                config = json.loads(args.config.read_text(encoding="utf-8"))
+
+        model_path = _resolve_run_model(requested_model, config, args.models_dir)
         if not model_path.is_file():
             raise ValueError(f"Model file not found: {model_path}")
     except (OSError, json.JSONDecodeError, ValueError) as error:
@@ -587,7 +661,7 @@ def _suggest_command(args: argparse.Namespace) -> int:
     print(render_suggestions(rows, catalog_budget(specs), theme))
     recommended = next((row for row in rows if row["recommended"]), None)
     if recommended:
-        print(f"\nDownload the recommended model with:\n  fastloadai download {recommended['repo']}")
+        print("\nRun the recommended model with:\n  fastloadai run")
     else:
         print(
             "\nNo catalog model fits comfortably. Try a smaller repository or "
@@ -665,9 +739,26 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
 
     run = commands.add_parser("run", help="Apply the hardware plan and open an interactive chat.")
-    run.add_argument("model", nargs="?", help="Downloaded model name or path to a GGUF file.")
+    run.add_argument(
+        "model",
+        nargs="?",
+        help="Model name, GGUF path, or Hugging Face repo ID. Omit it to auto-select one.",
+    )
     run.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     run.add_argument("--models-dir", type=Path, default=Path("models"))
+    run.add_argument(
+        "--prefer",
+        choices=("speed", "balanced", "quality"),
+        default="balanced",
+        help="Quantization trade-off when run downloads a model. Default: balanced.",
+    )
+    run.add_argument("--token", help="Hugging Face token; HF_TOKEN is used as a fallback.")
+    run.add_argument("--revision", help="Hugging Face revision for auto-downloads.")
+    run.add_argument(
+        "--force",
+        action="store_true",
+        help="Download even when the model does not fit the estimated memory.",
+    )
     run.add_argument("--prompt", help="Send one message before the interactive prompt.")
     run.add_argument("--once", action="store_true", help="Answer the prompt and exit.")
     run.add_argument("--threads", type=int, help="Override CPU threads.")
