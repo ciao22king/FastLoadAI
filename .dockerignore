@@ -1,0 +1,13 @@
+.git
+.openhands
+__pycache__
+*.py[cod]
+*.egg-info
+.venv
+venv
+build
+dist
+models
+*.gguf
+fastloadai-config.json
+.pytest_cache

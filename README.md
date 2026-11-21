@@ -16,6 +16,32 @@ The installer creates an isolated virtualenv in `~/.local/share/fastloadai-venv`
 
 The installer does not compile `llama.cpp` and does not need `sudo`; it installs a CPU build. For GPU or custom builds, install a suitable `llama.cpp` build manually.
 
+## Docker
+
+A Docker image is included for machines where you do not want to install Python or `llama.cpp`. It is CPU-only and builds for `linux/amd64` and `linux/arm64`.
+
+```bash
+docker build -t fastloadai .
+docker volume create fastloadai-data
+
+docker run --rm -v fastloadai-data:/data fastloadai suggest
+docker run --rm -v fastloadai-data:/data fastloadai download Qwen/Qwen2.5-0.5B-Instruct-GGUF
+docker run --rm -it -v fastloadai-data:/data fastloadai run
+```
+
+The `/data` volume keeps models, the Hugging Face cache and `fastloadai-config.json` between runs. Add `-e HF_TOKEN=...` for gated repositories. `--memory=4g` limits the container; FastLoadAI reads the cgroup limit, so `suggest`, `download` and `run` choose settings that fit that limit. Use `run --low-memory` on very small limits.
+
+The same workflow is available with Compose:
+
+```bash
+docker compose build
+docker compose run --rm fastloadai suggest
+docker compose run --rm fastloadai download Qwen/Qwen2.5-0.5B-Instruct-GGUF
+docker compose run --rm fastloadai run
+```
+
+The image uses the CPU build of `llama.cpp`. For GPU acceleration, use the native installer with a suitable `llama.cpp` build.
+
 ## Usage
 
 ```bash

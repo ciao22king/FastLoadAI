@@ -33,13 +33,82 @@ def _meminfo_gb(key: str) -> float:
     return 0.0
 
 
+def _read_text(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def _cgroup_memory_limit_gb() -> float:
+    for path in (
+        Path("/sys/fs/cgroup/memory.max"),
+        Path("/sys/fs/cgroup/memory/memory.limit_in_bytes"),
+    ):
+        raw = _read_text(path)
+        if not raw or raw == "max":
+            continue
+        try:
+            value = int(raw)
+        except ValueError:
+            continue
+        if 0 < value < 1 << 60:
+            return value / (1024**3)
+    return 0.0
+
+
+def _cgroup_memory_usage_gb() -> float:
+    for path in (
+        Path("/sys/fs/cgroup/memory.current"),
+        Path("/sys/fs/cgroup/memory/memory.usage_in_bytes"),
+    ):
+        raw = _read_text(path)
+        try:
+            return int(raw) / (1024**3)
+        except ValueError:
+            continue
+    return 0.0
+
+
+def _cpu_count_from_quota(quota: int, period: int) -> int:
+    if quota > 0 and period > 0:
+        return max(1, round(quota / period))
+    return 0
+
+
+def _cgroup_cpu_count() -> int:
+    raw = _read_text(Path("/sys/fs/cgroup/cpu.max"))
+    parts = raw.split()
+    if len(parts) == 2 and parts[0] != "max":
+        try:
+            count = _cpu_count_from_quota(int(parts[0]), int(parts[1]))
+        except ValueError:
+            count = 0
+        if count:
+            return count
+
+    try:
+        quota = int(_read_text(Path("/sys/fs/cgroup/cpu/cpu.cfs_quota_us")))
+        period = int(
+            _read_text(Path("/sys/fs/cgroup/cpu/cpu.cfs_period_us")) or "100000"
+        )
+    except ValueError:
+        return 0
+    return _cpu_count_from_quota(quota, period)
+
+
 def _total_ram_gb() -> float:
     try:
         pages = os.sysconf("SC_PHYS_PAGES")
         page_size = os.sysconf("SC_PAGE_SIZE")
-        return pages * page_size / (1024**3)
+        total = pages * page_size / (1024**3)
     except (AttributeError, OSError, ValueError):
-        return _meminfo_gb("MemTotal")
+        total = _meminfo_gb("MemTotal")
+
+    limit = _cgroup_memory_limit_gb()
+    if limit and (total <= 0 or limit < total):
+        return limit
+    return total
 
 
 def _macos_available_ram_gb() -> float:
@@ -74,11 +143,18 @@ def _macos_available_ram_gb() -> float:
 
 def _available_ram_gb() -> float:
     available = _meminfo_gb("MemAvailable")
-    if available:
-        return available
-    if platform.system() == "Darwin":
-        return _macos_available_ram_gb()
-    return _total_ram_gb()
+    if not available:
+        available = (
+            _macos_available_ram_gb()
+            if platform.system() == "Darwin"
+            else _total_ram_gb()
+        )
+
+    limit = _cgroup_memory_limit_gb()
+    if limit:
+        remaining = max(0.0, limit - _cgroup_memory_usage_gb())
+        return min(available, remaining) if available else remaining
+    return available
 
 
 def _disk_free_gb() -> float:
@@ -125,8 +201,12 @@ def detect_hardware() -> HardwareSpecs:
     unified_memory = False
     if not gpu_name:
         gpu_name, gpu_vram_gb, unified_memory = _apple_gpu(ram_gb)
+    cpu_threads = max(1, os.cpu_count() or 1)
+    cgroup_cpus = _cgroup_cpu_count()
+    if cgroup_cpus:
+        cpu_threads = min(cpu_threads, cgroup_cpus)
     return HardwareSpecs(
-        cpu_threads=max(1, os.cpu_count() or 1),
+        cpu_threads=cpu_threads,
         ram_gb=round(ram_gb, 2),
         gpu_name=gpu_name,
         gpu_vram_gb=round(gpu_vram_gb, 2),

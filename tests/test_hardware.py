@@ -25,6 +25,8 @@ from fastloadai.cli import (
 )
 from fastloadai.hardware import (
     HardwareSpecs,
+    _cgroup_memory_limit_gb,
+    _cpu_count_from_quota,
     _macos_available_ram_gb,
     model_fit,
     recommend_settings,
@@ -278,6 +280,18 @@ class HardwareRecommendationTests(unittest.TestCase):
         self.assertEqual(model_fit(specs, 1.1), "tight")
         self.assertEqual(model_fit(specs, 2.0), "too_large")
         self.assertEqual(model_fit(specs, 0.0), "unknown")
+
+    def test_cgroup_memory_limit_is_parsed(self):
+        def fake_read(path):
+            return "2147483648" if str(path).endswith("memory.max") else ""
+
+        with patch("fastloadai.hardware._read_text", side_effect=fake_read):
+            self.assertAlmostEqual(_cgroup_memory_limit_gb(), 2.0)
+
+    def test_cgroup_cpu_quota_is_rounded_to_threads(self):
+        self.assertEqual(_cpu_count_from_quota(200000, 100000), 2)
+        self.assertEqual(_cpu_count_from_quota(50000, 100000), 1)
+        self.assertEqual(_cpu_count_from_quota(-1, 100000), 0)
 
     def test_macos_available_memory_uses_vm_stat(self):
         def fake_run(command, **kwargs):

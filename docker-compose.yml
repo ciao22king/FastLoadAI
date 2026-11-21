@@ -1,0 +1,13 @@
+services:
+  fastloadai:
+    build: .
+    image: fastloadai:latest
+    stdin_open: true
+    tty: true
+    volumes:
+      - fastloadai-data:/data
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+
+volumes:
+  fastloadai-data:
