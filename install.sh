@@ -4,10 +4,8 @@ set -eu
 REPO_URL="https://github.com/ciao22king/FastLoadAI.git"
 REF=${FASTLOADAI_REF:-main}
 INSTALL_DIR=${FASTLOADAI_HOME:-"$HOME/.local/share/fastloadai"}
-VENV_DIR=${FASTLOADAI_VENV:-"$HOME/.local/share/fastloadai-venv"}
 BIN_DIR=${FASTLOADAI_BIN_DIR:-"$HOME/.local/bin"}
 LLAMA_ROOT=${FASTLOADAI_LLAMA_HOME:-"$HOME/.local/share/fastloadai-llama"}
-PYTHON_BIN=${PYTHON:-python3}
 
 if ! command -v git >/dev/null 2>&1; then
     printf '%s\n' "Error: git is not installed." >&2
@@ -17,8 +15,8 @@ if ! command -v curl >/dev/null 2>&1; then
     printf '%s\n' "Error: curl is not installed." >&2
     exit 1
 fi
-if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
-    printf '%s\n' "Error: Python 3 is not installed or PYTHON is invalid." >&2
+if ! command -v go >/dev/null 2>&1; then
+    printf '%s\n' "Error: Go is not installed. Install Go 1.24 or newer from https://go.dev/dl/." >&2
     exit 1
 fi
 
@@ -37,19 +35,19 @@ else
     git clone --depth 1 --branch "$REF" "$REPO_URL" "$INSTALL_DIR"
 fi
 
-if [ ! -x "$VENV_DIR/bin/python" ]; then
-    mkdir -p "$(dirname "$VENV_DIR")"
-    "$PYTHON_BIN" -m venv "$VENV_DIR"
-fi
-
-"$VENV_DIR/bin/python" -m pip install --upgrade "$INSTALL_DIR[huggingface]"
-
 mkdir -p "$BIN_DIR"
 if [ -e "$BIN_DIR/fastloadai" ] && [ ! -L "$BIN_DIR/fastloadai" ]; then
     printf 'Error: %s already exists and is not a symlink; refusing to overwrite it.\n' "$BIN_DIR/fastloadai" >&2
     exit 1
 fi
-ln -sfn "$VENV_DIR/bin/fastloadai" "$BIN_DIR/fastloadai"
+printf 'Building FastLoadAI...\n'
+BUILD_TMP="$BIN_DIR/.fastloadai.tmp"
+if ! (cd "$INSTALL_DIR" && go build -trimpath -o "$BUILD_TMP" ./cmd/fastloadai); then
+    rm -f "$BUILD_TMP"
+    printf '%s\n' "Error: Go build failed. FastLoadAI needs Go 1.24 or newer." >&2
+    exit 1
+fi
+mv "$BUILD_TMP" "$BIN_DIR/fastloadai"
 
 if ! command -v llama-server >/dev/null 2>&1 || ! command -v llama-quantize >/dev/null 2>&1; then
     case "$(uname -s)" in
@@ -70,18 +68,11 @@ if ! command -v llama-server >/dev/null 2>&1 || ! command -v llama-quantize >/de
             ;;
     esac
 
-    LLAMA_SUFFIX="-bin-$LLAMA_PLATFORM-$LLAMA_ARCH.tar.gz"
-    LLAMA_ASSET_URL=$(curl -fsSL "https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=20" | "$VENV_DIR/bin/python" -c '
-import json
-import sys
-
-suffix = sys.argv[1]
-for release in json.load(sys.stdin):
-    for asset in release.get("assets", []):
-        if asset["name"].startswith("llama-") and asset["name"].endswith(suffix):
-            print(asset["browser_download_url"])
-            raise SystemExit(0)
-' "$LLAMA_SUFFIX")
+    LLAMA_ASSET_URL=$(curl -fsSL "https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=20" \
+        | grep -o '"browser_download_url": *"[^"]*"' \
+        | sed 's/.*"\(https:[^"]*\)"/\1/' \
+        | grep "llama-.*-bin-${LLAMA_PLATFORM}-${LLAMA_ARCH}.tar.gz" \
+        | head -n 1)
     if [ -z "$LLAMA_ASSET_URL" ]; then
         printf 'Error: no llama.cpp binary found for %s/%s.\n' "$LLAMA_PLATFORM" "$LLAMA_ARCH" >&2
         exit 1
@@ -90,11 +81,11 @@ for release in json.load(sys.stdin):
     TMP_DIR=$(mktemp -d)
     trap 'rm -rf "$TMP_DIR"' 0
     printf 'Downloading the llama.cpp CPU runtime for %s/%s...\n' "$LLAMA_PLATFORM" "$LLAMA_ARCH"
-    if ! curl -fL --retry 2 -o "$TMP_DIR/llama.cpp.tar.gz" "$LLAMA_ASSET_URL"; then
+    if ! curl -fL --retry 2 -o "$TMP_DIR/llama.tar.gz" "$LLAMA_ASSET_URL"; then
         printf '%s\n' "Error: llama.cpp runtime download failed." >&2
         exit 1
     fi
-    if ! tar -xzf "$TMP_DIR/llama.cpp.tar.gz" -C "$TMP_DIR"; then
+    if ! tar -xzf "$TMP_DIR/llama.tar.gz" -C "$TMP_DIR"; then
         printf '%s\n' "Error: invalid llama.cpp archive." >&2
         exit 1
     fi
@@ -127,7 +118,7 @@ case ":${PATH:-}:" in
     *":$BIN_DIR:"*) ;;
     *) printf 'Add to PATH: export PATH="%s:$PATH"\n' "$BIN_DIR" ;;
 esac
-if ! command -v llama-server >/dev/null 2>&1; then
+if ! command -v llama-server >/dev/null 2>&1 && [ ! -x "$BIN_DIR/llama-server" ]; then
     printf '%s\n' "Error: llama-server was not installed or is not on PATH." >&2
     exit 1
 fi

@@ -1,7 +1,15 @@
-__pycache__/
-*.py[cod]
-*.egg-info/
-build/
-dist/
+# Go build output
+/fastloadai
+*.test
+*.out
+coverage.*
+
+# Runtime data
+models/
+fastloadai-config.json
+*.part-*
+
+# Local tools
+.openhands/
 .venv/
 venv/

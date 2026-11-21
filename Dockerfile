@@ -1,14 +1,18 @@
 # syntax=docker/dockerfile:1
 
-FROM python:3.12-slim
+FROM golang:1.24-bookworm AS build
+WORKDIR /src
+COPY go.mod ./
+COPY cmd ./cmd
+COPY internal ./internal
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/fastloadai ./cmd/fastloadai
 
-ARG LLAMA_VERSION=b12608
+FROM debian:bookworm-slim
+
+ARG LLAMA_VERSION=b12613
 ARG TARGETARCH=amd64
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
-    HF_HOME=/data/.cache/huggingface \
+ENV HF_HOME=/data/.cache/huggingface \
     LD_LIBRARY_PATH=/opt/llama/current
 
 RUN apt-get update \
@@ -20,11 +24,6 @@ RUN apt-get update \
         libzstd1 \
         zlib1g \
     && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /app
-COPY pyproject.toml README.md LICENSE ./
-COPY src ./src
-RUN pip install .
 
 RUN set -eu; \
     case "${TARGETARCH}" in \
@@ -47,6 +46,8 @@ RUN set -eu; \
         fi; \
     done; \
     rm -f /tmp/llama.tar.gz
+
+COPY --from=build /out/fastloadai /usr/local/bin/fastloadai
 
 WORKDIR /data
 VOLUME ["/data"]
