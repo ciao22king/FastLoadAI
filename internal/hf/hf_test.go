@@ -7,7 +7,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func size(value int64) *int64 { return &value }
@@ -119,5 +121,66 @@ func TestDownloadGroup(t *testing.T) {
 		if string(data) != want {
 			t.Fatalf("%s = %q, want %q", filepath.Base(path), data, want)
 		}
+	}
+}
+
+func TestAutoWorkers(t *testing.T) {
+	if got := AutoWorkers(0); got != 0 {
+		t.Fatalf("AutoWorkers(0) = %d", got)
+	}
+	if got := AutoWorkers(1); got != 1 {
+		t.Fatalf("AutoWorkers(1) = %d", got)
+	}
+	for _, files := range []int{2, 8, 100} {
+		got := AutoWorkers(files)
+		if got < 1 || got > files || got > maxDownloadWorkers {
+			t.Fatalf("AutoWorkers(%d) = %d", files, got)
+		}
+	}
+	if got := ClampWorkers(100, 100); got != maxDownloadWorkers {
+		t.Fatalf("ClampWorkers(100, 100) = %d", got)
+	}
+	if got := ClampWorkers(8, 2); got != 2 {
+		t.Fatalf("ClampWorkers(8, 2) = %d", got)
+	}
+	if got := ClampWorkers(0, 0); got != 0 {
+		t.Fatalf("ClampWorkers(0, 0) = %d", got)
+	}
+}
+
+func TestDownloadGroupRunsInParallel(t *testing.T) {
+	const fileCount = 8
+	var active, peak int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		current := atomic.AddInt32(&active, 1)
+		for {
+			previous := atomic.LoadInt32(&peak)
+			if current <= previous || atomic.CompareAndSwapInt32(&peak, previous, current) {
+				break
+			}
+		}
+		time.Sleep(40 * time.Millisecond)
+		atomic.AddInt32(&active, -1)
+		fmt.Fprint(w, "shard")
+	}))
+	defer server.Close()
+
+	group := Group{Name: "parallel.gguf", FileSizes: map[string]int64{}}
+	for index := 0; index < fileCount; index++ {
+		name := fmt.Sprintf("parallel-%05d-of-%05d.gguf", index+1, fileCount)
+		group.Files = append(group.Files, name)
+		group.FileSizes[name] = 5
+	}
+	client := NewClient("")
+	client.BaseURL = server.URL
+	paths, err := client.DownloadGroup(context.Background(), "org/repo", "main", t.TempDir(), group, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != fileCount {
+		t.Fatalf("got %d paths, want %d", len(paths), fileCount)
+	}
+	if got := atomic.LoadInt32(&peak); got < 2 {
+		t.Fatalf("peak parallel downloads = %d, want at least 2", got)
 	}
 }

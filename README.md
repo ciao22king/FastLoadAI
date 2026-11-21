@@ -11,6 +11,8 @@ runs locally: no prompt or model data leaves the machine.
 
 - Hardware-aware model and quantization selection.
 - Real file sizes from the Hugging Face API, including sharded GGUF files.
+- Parallel shard downloads with an auto-tuned worker pool (up to 16 workers).
+- Hardware probing, Hugging Face metadata and doctor checks run concurrently.
 - One-command download and chat: `fastloadai run qwen2.5-0.5b`.
 - Streaming chat with history trimming, retry, context usage and session stats.
 - A polished terminal UI with a banner, spinner, colour themes and summaries.
@@ -73,6 +75,7 @@ fastloadai suggest --json
 fastloadai download Qwen/Qwen2.5-0.5B-Instruct-GGUF
 fastloadai download Qwen/Qwen2.5-0.5B-Instruct-GGUF --dry-run
 fastloadai download Qwen/Qwen2.5-0.5B-Instruct-GGUF --prefer quality
+fastloadai download Qwen/Qwen2.5-7B-Instruct-GGUF --workers 8
 fastloadai models
 fastloadai models --json
 fastloadai plan ./model.gguf --output config.json
@@ -98,10 +101,12 @@ this machine. It prints the exact `run` command to copy.
 `download` inspects the GGUF files in a Hugging Face repository, downloads the
 best quantization that fits, and writes the runtime config. `--prefer balanced`
 (default) targets a 4-5 bit K-quant, `speed` targets 4 bit, and `quality`
-targets 8 bit. `--file` selects an exact file or shard. `--dry-run` shows the
-choice and memory fit without downloading. Sharded models are downloaded
-together and verified against the API size. If nothing fits, the command
-refuses unless `--force` is set.
+targets 8 bit. `--file` selects an exact file or shard. `--workers` sets the
+parallel download width; `0` (default) auto-tunes it from the CPU count, with a
+minimum of 4 and a maximum of 16, never more than the shard count. `--dry-run`
+shows the choice, worker count and memory fit without downloading. Sharded
+models are downloaded together and verified against the API size. If nothing
+fits, the command refuses unless `--force` is set.
 
 `models` lists downloaded GGUF files, grouped by shard, with size,
 quantization and fit. `--json` is available for scripts.
@@ -122,7 +127,7 @@ path. If the model is missing, it downloads the best fit first, then starts
 - `--threads`, `--ctx-size`, `--gpu-layers` override the plan.
 - `--temperature`, `--max-tokens` and `--system` tune generation.
 - `--low-memory` forces a small context and small batches.
-- `--token`, `--revision` and `--force` work like `download`.
+- `--token`, `--revision`, `--force` and `--workers` work like `download`.
 - `--no-color` disables ANSI colour for logs and CI.
 
 `quantize` runs `llama-quantize` on an existing GGUF file.
@@ -151,7 +156,11 @@ Each config records the detected hardware and the recommended settings: CPU
 threads, context size, mmap, model fit, low-memory mode and GPU offload.
 
 The model budget uses currently available RAM, not total RAM, so it adapts to
-other applications and to container limits. The context starts at 1K-8K
+other applications and to container limits. Hardware probes, Hugging Face
+metadata and runtime checks run in parallel, and `run` reuses one hardware scan
+for both download planning and chat setup. CPU threads use every logical CPU
+visible to the process, including cgroup limits, capped at 32; override with
+`--threads`. The context starts at 1K-8K
 depending on free memory and doubles when the model leaves at least 4 GB of
 headroom, capped at 8K. `mmap` lets `llama.cpp` map weights and load pages on
 demand. The estimate is conservative, not a guarantee against running out of
@@ -206,7 +215,7 @@ the official `llama.cpp` b12613 build:
 
 | Model | Quant | Context | Speed |
 | --- | --- | --- | --- |
-| Qwen2.5-0.5B-Instruct | Q4_K_M | 8192 | ~20-25 tok/s |
+| Qwen2.5-0.5B-Instruct | Q4_K_M | 8192 | ~40-55 tok/s |
 
 Speeds are short-generation estimates and vary with prompt length, threads and
 CPU.

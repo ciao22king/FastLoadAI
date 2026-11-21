@@ -15,7 +15,7 @@ import (
 )
 
 // Version is shown in the banner and by --version.
-const Version = "0.5.0"
+const Version = "0.6.0"
 
 const (
 	Reset   = "\033[0m"
@@ -403,6 +403,9 @@ func RenderHardware(specs model.Specs, theme Theme) string {
 	rows := [][2]string{{"Platform", runtime.GOOS + "/" + runtime.GOARCH}}
 	if specs.CPUName != "" {
 		rows = append(rows, [2]string{"CPU", fitText(specs.CPUName, 48)})
+	}
+	if specs.PhysicalCores > 0 {
+		rows = append(rows, [2]string{"CPU cores", strconv.Itoa(specs.PhysicalCores)})
 	}
 	rows = append(rows,
 		[2]string{"CPU threads", strconv.Itoa(specs.CPUThreads)},

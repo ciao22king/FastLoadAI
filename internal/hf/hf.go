@@ -13,6 +13,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -292,17 +293,49 @@ func GroupSizeGB(group Group) float64 {
 	return float64(group.Size) / (1024 * 1024 * 1024)
 }
 
+const maxDownloadWorkers = 16
+
+// ClampWorkers resolves an explicit or automatic worker count for a file list.
+func ClampWorkers(workers, files int) int {
+	if files <= 0 {
+		return 0
+	}
+	if workers <= 0 {
+		workers = AutoWorkers(files)
+	}
+	if workers > maxDownloadWorkers {
+		workers = maxDownloadWorkers
+	}
+	if workers > files {
+		workers = files
+	}
+	return workers
+}
+
+// AutoWorkers picks a parallel download width for a number of files.
+func AutoWorkers(files int) int {
+	if files <= 0 {
+		return 0
+	}
+	workers := runtime.NumCPU() * 2
+	if workers < 4 {
+		workers = 4
+	}
+	if workers > maxDownloadWorkers {
+		workers = maxDownloadWorkers
+	}
+	if workers > files {
+		workers = files
+	}
+	return workers
+}
+
 // DownloadGroup downloads all files of a group concurrently and returns paths.
 func (c *Client) DownloadGroup(ctx context.Context, repo, revision, localDir string, group Group, workers int) ([]string, error) {
 	if len(group.Files) == 0 {
 		return nil, errors.New("no files to download")
 	}
-	if workers <= 0 {
-		workers = 4
-	}
-	if workers > len(group.Files) {
-		workers = len(group.Files)
-	}
+	workers = ClampWorkers(workers, len(group.Files))
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 

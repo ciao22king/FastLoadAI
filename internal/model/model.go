@@ -11,6 +11,7 @@ type Message struct {
 type Specs struct {
 	CPUName        string  `json:"cpu_name,omitempty"`
 	CPUThreads     int     `json:"cpu_threads"`
+	PhysicalCores  int     `json:"physical_cores,omitempty"`
 	RAMGB          float64 `json:"ram_gb"`
 	GPUName        string  `json:"gpu_name,omitempty"`
 	GPUVramGB      float64 `json:"gpu_vram_gb"`

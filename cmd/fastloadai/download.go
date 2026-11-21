@@ -22,6 +22,8 @@ type downloadOptions struct {
 	Token     string
 	Revision  string
 	Prefer    string
+	Workers   int
+	Specs     *model.Specs
 	DryRun    bool
 	Force     bool
 }
@@ -29,7 +31,7 @@ type downloadOptions struct {
 func commandDownload(args []string) int {
 	positional, flags := splitArgs(args, map[string]bool{
 		"--file": true, "--directory": true, "--output": true, "--token": true,
-		"--revision": true, "--prefer": true,
+		"--revision": true, "--prefer": true, "--workers": true,
 	})
 	set := flag.NewFlagSet("download", flag.ContinueOnError)
 	file := set.String("file", "", "explicit GGUF file or shard")
@@ -38,6 +40,7 @@ func commandDownload(args []string) int {
 	token := set.String("token", "", "Hugging Face token")
 	revision := set.String("revision", "", "Hugging Face revision")
 	prefer := set.String("prefer", "balanced", "speed, balanced or quality")
+	workers := set.Int("workers", 0, "parallel downloads (0 = auto)")
 	dryRun := set.Bool("dry-run", false, "show the plan without downloading")
 	force := set.Bool("force", false, "download even when the model may not fit")
 	noColor := set.Bool("no-color", false, "disable color")
@@ -51,17 +54,23 @@ func commandDownload(args []string) int {
 	opts := downloadOptions{
 		Repo: positional[0], File: *file, Directory: *directory, Output: *output,
 		Token: tokenValue(*token), Revision: *revision, Prefer: *prefer,
-		DryRun: *dryRun, Force: *force,
+		Workers: *workers, DryRun: *dryRun, Force: *force,
 	}
 	_, code := performDownload(context.Background(), opts, themeFor(*noColor))
 	return code
 }
 
 func performDownload(ctx context.Context, opts downloadOptions, theme tui.Theme) (model.Config, int) {
-	specs := hardware.Detect()
-	budget := hardware.UsableModelMemoryGB(specs)
+	specsCh := make(chan model.Specs, 1)
+	if opts.Specs != nil {
+		specsCh <- *opts.Specs
+	} else {
+		go func() { specsCh <- hardware.Detect() }()
+	}
 	client := hf.NewClient(opts.Token)
 	info, err := client.ModelInfo(ctx, opts.Repo, opts.Revision)
+	specs := <-specsCh
+	budget := hardware.UsableModelMemoryGB(specs)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Could not inspect %s: %v\n", opts.Repo, err)
 		if isAuthError(err) {
@@ -77,10 +86,12 @@ func performDownload(ctx context.Context, opts downloadOptions, theme tui.Theme)
 	}
 	sizeGB := hf.GroupSizeGB(group)
 	fit := hardware.ModelFit(specs, sizeGB)
+	workers := hf.ClampWorkers(opts.Workers, len(group.Files))
 	rows := [][2]string{
 		{"Repository", opts.Repo},
 		{"File", group.Name},
 		{"Files", fmt.Sprintf("%d", len(group.Files))},
+		{"Parallel", workerLabel(workers)},
 		{"Size", sizeLabel(group)},
 		{"Memory budget", tui.FormatSize(budget)},
 		{"Model fit", theme.Paint(fit, fitStyle(fit))},
@@ -109,8 +120,8 @@ func performDownload(ctx context.Context, opts downloadOptions, theme tui.Theme)
 		fmt.Fprintln(os.Stderr, theme.Paint("Warning: this model is larger than the estimated memory. It may load slowly or fail.", tui.Yellow))
 	}
 	localDir := filepath.Join(opts.Directory, filepath.FromSlash(opts.Repo))
-	spinner := tui.StartSpinner("downloading "+group.Name, theme)
-	paths, err := client.DownloadGroup(ctx, opts.Repo, opts.Revision, localDir, group, 4)
+	spinner := tui.StartSpinner("downloading "+group.Name+" with "+workerLabel(workers), theme)
+	paths, err := client.DownloadGroup(ctx, opts.Repo, opts.Revision, localDir, group, workers)
 	spinner.Stop()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Download failed: %v\n", err)
@@ -147,6 +158,13 @@ func performDownload(ctx context.Context, opts downloadOptions, theme tui.Theme)
 		{"Config file", opts.Output},
 	}, theme, "  "))
 	return cfg, 0
+}
+
+func workerLabel(workers int) string {
+	if workers == 1 {
+		return "1 worker"
+	}
+	return fmt.Sprintf("%d workers", workers)
 }
 
 func sizeLabel(group hf.Group) string {

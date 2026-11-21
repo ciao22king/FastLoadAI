@@ -45,4 +45,25 @@ func TestDetectReportsUsableHardware(t *testing.T) {
 	if specs.RAMGB <= 0 {
 		t.Fatalf("RAM = %.2f", specs.RAMGB)
 	}
+	if specs.PhysicalCores < 1 {
+		t.Fatalf("physical cores = %d", specs.PhysicalCores)
+	}
+}
+
+func TestRecommendedThreads(t *testing.T) {
+	cases := []struct {
+		specs model.Specs
+		want  int
+	}{
+		{model.Specs{}, 1},
+		{model.Specs{CPUThreads: 4}, 4},
+		{model.Specs{CPUThreads: 32, PhysicalCores: 16}, 32},
+		{model.Specs{CPUThreads: 4, PhysicalCores: 8}, 4},
+		{model.Specs{CPUThreads: 64, PhysicalCores: 64}, 32},
+	}
+	for _, item := range cases {
+		if got := RecommendedThreads(item.specs); got != item.want {
+			t.Fatalf("RecommendedThreads(%+v) = %d, want %d", item.specs, got, item.want)
+		}
+	}
 }

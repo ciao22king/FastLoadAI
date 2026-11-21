@@ -78,6 +78,7 @@ Examples:
   fastloadai run qwen2.5-0.5b
   fastloadai run Qwen/Qwen2.5-0.5B-Instruct-GGUF --prompt "Hello"
   fastloadai download Qwen/Qwen2.5-0.5B-Instruct-GGUF --dry-run
+  fastloadai download Qwen/Qwen2.5-7B-Instruct-GGUF --workers 8
   fastloadai models --json
 `)
 }

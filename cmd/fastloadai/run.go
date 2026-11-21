@@ -20,6 +20,7 @@ func commandRun(args []string) int {
 		"--config": true, "--models-dir": true, "--prefer": true, "--token": true,
 		"--revision": true, "--prompt": true, "--threads": true, "--ctx-size": true,
 		"--gpu-layers": true, "--temperature": true, "--max-tokens": true, "--system": true,
+		"--workers": true,
 	})
 	set := flag.NewFlagSet("run", flag.ContinueOnError)
 	configPath := set.String("config", defaultConfig, "config file")
@@ -28,6 +29,7 @@ func commandRun(args []string) int {
 	token := set.String("token", "", "Hugging Face token")
 	revision := set.String("revision", "", "Hugging Face revision")
 	force := set.Bool("force", false, "download even when the model may not fit")
+	workers := set.Int("workers", 0, "parallel downloads (0 = auto)")
 	prompt := set.String("prompt", "", "send one message before the interactive prompt")
 	once := set.Bool("once", false, "answer the prompt and exit")
 	threads := set.Int("threads", 0, "override CPU threads")
@@ -53,6 +55,7 @@ func commandRun(args []string) int {
 	if !exists {
 		cfg = model.Config{}
 	}
+	specs := hardware.Detect()
 	modelPath, resolveErr := resolveModel(requested, cfg, *modelsDir)
 	if resolveErr != nil || modelPath == "" {
 		repo := ""
@@ -86,6 +89,7 @@ func commandRun(args []string) int {
 		downloaded, code := performDownload(context.Background(), downloadOptions{
 			Repo: repo, Directory: *modelsDir, Output: *configPath,
 			Token: tokenValue(*token), Revision: *revision, Prefer: *prefer, Force: *force,
+			Workers: *workers, Specs: &specs,
 		}, themeFor(*noColor))
 		if code != 0 {
 			return code
@@ -102,7 +106,6 @@ func commandRun(args []string) int {
 		fmt.Fprintf(os.Stderr, "Model file not found: %s\n", modelPath)
 		return 2
 	}
-	specs := hardware.Detect()
 	sizeBytes := int64(0)
 	if cfg.ModelPath != "" && absModelPath(cfg.ModelPath) == absModelPath(modelPath) {
 		sizeBytes = cfg.ModelSizeBytes

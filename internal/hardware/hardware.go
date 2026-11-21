@@ -217,6 +217,48 @@ func cpuName() string {
 	return ""
 }
 
+func physicalCores() int {
+	switch runtime.GOOS {
+	case "linux":
+		data, err := os.ReadFile("/proc/cpuinfo")
+		if err == nil {
+			pairs := map[string]bool{}
+			processors := 0
+			for _, block := range strings.Split(string(data), "\n\n") {
+				physical, core := "", ""
+				for _, line := range strings.Split(block, "\n") {
+					key, value, ok := strings.Cut(line, ":")
+					if !ok {
+						continue
+					}
+					switch strings.TrimSpace(key) {
+					case "processor":
+						processors++
+					case "physical id":
+						physical = strings.TrimSpace(value)
+					case "core id":
+						core = strings.TrimSpace(value)
+					}
+				}
+				if core != "" {
+					pairs[physical+"/"+core] = true
+				}
+			}
+			if len(pairs) > 0 {
+				return len(pairs)
+			}
+			if processors > 0 {
+				return processors
+			}
+		}
+	case "darwin":
+		if cores := int(commandFloat("sysctl", "-n", "hw.physicalcpu")); cores > 0 {
+			return cores
+		}
+	}
+	return runtime.NumCPU()
+}
+
 func commandString(name string, args ...string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -283,10 +325,12 @@ func Detect() model.Specs {
 		gpuName          string
 		gpuVRAM          float64
 		cpu              string
+		physical         int
 	)
 	total = totalRAMGB()
-	wg.Add(5)
+	wg.Add(6)
 	go func() { defer wg.Done(); cpu = cpuName() }()
+	go func() { defer wg.Done(); physical = physicalCores() }()
 	go func() { defer wg.Done(); disk = diskFreeGB() }()
 	go func() { defer wg.Done(); laptop = isLaptop() }()
 	go func() { defer wg.Done(); gpuName, gpuVRAM = nvidiaGPU() }()
@@ -301,9 +345,13 @@ func Detect() model.Specs {
 	if cpus := cgroupCPUCount(); cpus > 0 {
 		threads = min(threads, cpus)
 	}
+	if physical <= 0 || physical > threads {
+		physical = threads
+	}
 	return model.Specs{
 		CPUName:        cpu,
 		CPUThreads:     threads,
+		PhysicalCores:  physical,
 		RAMGB:          roundTo(total, 2),
 		GPUName:        gpuName,
 		GPUVramGB:      roundTo(gpuVRAM, 2),
@@ -379,6 +427,18 @@ func RecommendedContextSize(specs model.Specs, modelSizeGB float64) int {
 	return contextSize
 }
 
+// RecommendedThreads uses every available logical CPU, capped for llama.cpp.
+func RecommendedThreads(specs model.Specs) int {
+	threads := specs.CPUThreads
+	if threads < 1 {
+		return 1
+	}
+	if threads > 32 {
+		return 32
+	}
+	return threads
+}
+
 // RecommendSettings builds the runtime config for a model and machine.
 func RecommendSettings(specs model.Specs, modelPath string, modelSizeBytes int64) model.Config {
 	modelSizeGB := 0.0
@@ -407,7 +467,7 @@ func RecommendSettings(specs model.Specs, modelPath string, modelSizeBytes int64
 		available = specs.RAMGB
 	}
 	return model.Config{
-		CPUThreads:          max(1, min(specs.CPUThreads, 8)),
+		CPUThreads:          RecommendedThreads(specs),
 		ContextSize:         contextSize,
 		NGPULayers:          gpuLayers,
 		Mmap:                true,
