@@ -69,6 +69,8 @@ def build_server_command(
     ]
     if config.get("mmap") is False:
         command.append("--no-mmap")
+    if config.get("low_memory"):
+        command.extend(["--batch-size", "128", "--ubatch-size", "128"])
     return command
 
 
@@ -285,6 +287,20 @@ def _server_log_tail(log_file: Any) -> str:
     return log_file.read().strip()
 
 
+def _is_memory_error(details: str) -> bool:
+    lowered = details.lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "failed to allocate",
+            "out of memory",
+            "not enough memory",
+            "insufficient memory",
+            "bad_alloc",
+        )
+    )
+
+
 def run_chat(
     model_path: Path,
     config: dict[str, Any],
@@ -342,6 +358,15 @@ def run_chat(
             details = _server_log_tail(server_log)
             if details:
                 print(details, file=sys.stderr)
+            if details and _is_memory_error(details):
+                print(
+                    theme.paint(
+                        "llama-server ran out of memory. Try --ctx-size 1024, "
+                        "--prefer speed, or a smaller model (fastloadai suggest).",
+                        YELLOW,
+                    ),
+                    file=sys.stderr,
+                )
             return 1
         finally:
             _stop_server(process)

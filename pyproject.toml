@@ -4,12 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fastloadai"
-version = "0.1.0"
+version = "0.2.0"
 description = "Hardware-aware local model setup for llama.cpp"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
-dependencies = []
+dependencies = ["huggingface_hub>=0.24"]
 
 [project.optional-dependencies]
 huggingface = ["huggingface_hub>=0.24"]

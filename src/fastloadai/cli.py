@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -12,8 +13,14 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
+from .catalog import catalog_budget, catalog_rows
 from .chat import run_chat
-from .hardware import detect_hardware, recommend_settings, usable_model_memory_gb
+from .hardware import (
+    detect_hardware,
+    model_fit,
+    recommend_settings,
+    usable_model_memory_gb,
+)
 from .tui import (
     GREEN,
     RED,
@@ -24,6 +31,7 @@ from .tui import (
     render_hardware,
     render_kv,
     render_plan,
+    render_suggestions,
 )
 
 DEFAULT_CONFIG = Path("fastloadai-config.json")
@@ -149,10 +157,21 @@ def _plan_command(args: argparse.Namespace) -> int:
     specs = detect_hardware()
     model_path = Path(args.model) if args.model else None
     config = recommend_settings(specs, model_path)
+    if getattr(args, "low_memory", False):
+        config["low_memory"] = True
+        config["context_size"] = min(int(config["context_size"]), 1024)
     config["model_path"] = str(model_path.resolve()) if model_path else None
     _write_config(args.output, config)
     print(render_plan(config, str(args.output), Theme(color_enabled())))
     return 0
+
+
+def _hf_token(args: argparse.Namespace) -> str | None:
+    return (
+        getattr(args, "token", None)
+        or os.environ.get("HF_TOKEN")
+        or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    )
 
 
 def _download_command(args: argparse.Namespace) -> int:
@@ -162,29 +181,117 @@ def _download_command(args: argparse.Namespace) -> int:
         print("Install Hugging Face support with: pip install fastloadai[huggingface]", file=sys.stderr)
         return 2
 
+    theme = Theme(color_enabled())
     specs = detect_hardware()
+    budget_gb = usable_model_memory_gb(specs)
+    token = _hf_token(args)
+    revision = getattr(args, "revision", None)
+
     try:
-        model_info = HfApi().model_info(args.repo, files_metadata=True)
+        model_info = HfApi(token=token).model_info(
+            args.repo, files_metadata=True, revision=revision
+        )
         selected = _select_gguf(
             model_info.siblings,
-            usable_model_memory_gb(specs),
+            budget_gb,
             args.file,
             prefer=getattr(args, "prefer", "balanced"),
         )
-        if selected["size_known"] and selected["size"] > usable_model_memory_gb(specs) * (1024**3):
-            print("Warning: no quantization fits the estimated memory; downloading the requested or closest file.", file=sys.stderr)
+    except Exception as error:
+        message = str(error)
+        if isinstance(error, ValueError) and "gguf" in message.lower():
+            print(f"Cannot use {args.repo}: {message}", file=sys.stderr)
+            print(
+                "Choose a repository that contains GGUF files, usually named with a -GGUF suffix.",
+                file=sys.stderr,
+            )
+            return 1
+        print(f"Could not inspect {args.repo}: {message}", file=sys.stderr)
+        lowered = message.lower()
+        if "gated" in lowered or "401" in lowered or "403" in lowered:
+            print(
+                "This repository is gated. Accept its license on huggingface.co, then pass --token or set HF_TOKEN.",
+                file=sys.stderr,
+            )
+        return 1
 
+    selected_size_gb = selected["size"] / (1024**3) if selected["size_known"] else 0.0
+    fit = model_fit(specs, selected_size_gb)
+    rows = [
+        ("Repository", args.repo),
+        ("File", selected["name"]),
+        ("Size", format_size(selected_size_gb) if selected["size_known"] else "unknown"),
+        ("Memory budget", format_size(budget_gb)),
+        ("Model fit", fit),
+    ]
+    if revision:
+        rows.insert(1, ("Revision", revision))
+    if getattr(args, "dry_run", False):
+        print(render_kv("Download plan (dry run)", rows, theme), flush=True)
+        if fit == "too_large":
+            print(
+                theme.paint(
+                    "This file is larger than the estimated memory. Try a smaller model, --prefer speed, or --force.",
+                    YELLOW,
+                )
+            )
+        return 0
+
+    explicit_file = bool(args.file)
+    if fit == "too_large" and not explicit_file and not getattr(args, "force", False):
+        print(render_kv("Download plan", rows, theme), flush=True)
+        print(
+            theme.paint(
+                "No quantization fits this machine's estimated memory. Nothing was downloaded.",
+                RED,
+            ),
+            file=sys.stderr,
+        )
+        print(
+            "Try: fastloadai suggest, --prefer speed, a smaller repository, or --force to try anyway.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if selected["size_known"] and specs.disk_free_gb:
+        needed_gb = selected_size_gb * 1.05
+        if needed_gb > specs.disk_free_gb:
+            print(
+                f"Not enough disk space: need about {format_size(needed_gb)}, "
+                f"{format_size(specs.disk_free_gb)} free.",
+                file=sys.stderr,
+            )
+            return 1
+
+    if fit == "too_large":
+        print(
+            theme.paint(
+                "Warning: this model is larger than the estimated memory. "
+                "It will use mmap and may be slow or fail; try a smaller quantization.",
+                YELLOW,
+            ),
+            file=sys.stderr,
+        )
+
+    try:
         model_paths = [
             hf_hub_download(
                 repo_id=args.repo,
                 filename=filename,
                 local_dir=args.directory,
-                token=args.token,
+                token=token,
+                revision=revision,
             )
             for filename in sorted(selected["files"])
         ]
     except Exception as error:
-        print(f"Download failed: {error}", file=sys.stderr)
+        message = str(error)
+        print(f"Download failed: {message}", file=sys.stderr)
+        if "gated" in message.lower() or "401" in message or "403" in message:
+            print(
+                "Accept the model license on huggingface.co, then pass --token or set HF_TOKEN.",
+                file=sys.stderr,
+            )
         return 1
 
     model_path = Path(model_paths[0])
@@ -195,6 +302,7 @@ def _download_command(args: argparse.Namespace) -> int:
         {
             "model_path": str(model_path.resolve()),
             "model_repo": args.repo,
+            "revision": revision,
             "quantization": quant_label,
             "quantization_file": selected["name"],
             "model_size_bytes": model_size_bytes,
@@ -202,20 +310,16 @@ def _download_command(args: argparse.Namespace) -> int:
         }
     )
     _write_config(args.output, config)
-    print(
-        render_kv(
-            "Model ready",
-            [
-                ("Model", str(model_path)),
-                ("Quantization", quant_label),
-                ("File", selected["name"]),
-                ("Context", str(config["context_size"])),
-                ("Threads", str(config["cpu_threads"])),
-                ("Config file", str(args.output)),
-            ],
-            Theme(color_enabled()),
-        )
-    )
+    rows = [
+        ("Model", str(model_path)),
+        ("Quantization", quant_label),
+        ("Size", format_size(selected_size_gb) if selected["size_known"] else "unknown"),
+        ("Model fit", str(config["model_fit"])),
+        ("Context", str(config["context_size"])),
+        ("Threads", str(config["cpu_threads"])),
+        ("Config file", str(args.output)),
+    ]
+    print(render_kv("Model ready", rows, theme))
     return 0
 
 
@@ -296,6 +400,10 @@ def _run_command(args: argparse.Namespace) -> int:
     )
     if str(config.get("quantization", "")).lower().endswith(".gguf"):
         config["quantization"] = _quant_label(str(config["quantization"]))
+    if getattr(args, "low_memory", False):
+        config["low_memory"] = True
+        if getattr(args, "ctx_size", None) is None:
+            config["context_size"] = min(int(config["context_size"]), 1024)
     overrides = {
         "cpu_threads": getattr(args, "threads", None),
         "context_size": getattr(args, "ctx_size", None),
@@ -307,6 +415,25 @@ def _run_command(args: argparse.Namespace) -> int:
             config[key] = max(minimum, int(config[key]))
     config["model_path"] = str(model_path.resolve())
     _write_config(args.config, config)
+
+    fit = str(config.get("model_fit", "unknown"))
+    if fit == "too_large":
+        print(
+            Theme(color_enabled()).paint(
+                "Warning: this model is larger than the estimated memory. "
+                "Expect slow loading and possible failures; try a smaller quantization.",
+                YELLOW,
+            ),
+            file=sys.stderr,
+        )
+    elif fit == "tight":
+        print(
+            Theme(color_enabled()).paint(
+                "Note: this model is close to the memory limit. Close other apps if loading fails.",
+                YELLOW,
+            ),
+            file=sys.stderr,
+        )
 
     return run_chat(
         model_path,
@@ -341,6 +468,7 @@ def _models_command(args: argparse.Namespace) -> int:
         return 0
 
     theme = Theme(color_enabled())
+    specs = detect_hardware()
     if getattr(args, "json", False):
         payload = [
             {
@@ -348,19 +476,23 @@ def _models_command(args: argparse.Namespace) -> int:
                 "path": str(entry["path"]),
                 "size_bytes": entry["size"],
                 "quantization": _quant_label(name),
+                "fit": model_fit(specs, entry["size"] / (1024**3)),
             }
             for name, entry in sorted(groups.items())
         ]
         print(json.dumps(payload, indent=2))
         return 0
 
-    rows = [
-        (
-            str(entry["path"].relative_to(root)),
-            f"{_quant_label(name)} · {format_size(entry['size'] / (1024**3))}",
+    rows = []
+    for name, entry in sorted(groups.items()):
+        fit = model_fit(specs, entry["size"] / (1024**3))
+        style = GREEN if fit == "comfortable" else YELLOW if fit == "tight" else RED
+        rows.append(
+            (
+                str(entry["path"].relative_to(root)),
+                f"{_quant_label(name)} · {format_size(entry['size'] / (1024**3))} · {theme.paint(fit, style)}",
+            )
         )
-        for name, entry in sorted(groups.items())
-    ]
     print(render_kv("Local models", rows, theme))
     return 0
 
@@ -374,6 +506,20 @@ def _doctor_command(args: argparse.Namespace) -> int:
     python_ok = sys.version_info >= (3, 10)
     rows.append(("Python", f"{version} {theme.paint('ok', GREEN) if python_ok else theme.paint('need 3.10+', RED)}"))
     healthy = healthy and python_ok
+
+    specs = detect_hardware()
+    memory = format_size(specs.ram_gb)
+    if specs.available_ram_gb:
+        memory += f" ({format_size(specs.available_ram_gb)} free)"
+    rows.append(("System RAM", memory))
+    if specs.disk_free_gb:
+        rows.append(("Disk free", format_size(specs.disk_free_gb)))
+    if specs.gpu_name:
+        kind = "unified memory" if specs.unified_memory else "VRAM"
+        rows.append(("GPU", f"{specs.gpu_name} ({format_size(specs.gpu_vram_gb)} {kind})"))
+    else:
+        rows.append(("GPU", "none - CPU only"))
+    rows.append(("Model budget", format_size(usable_model_memory_gb(specs))))
 
     server = shutil.which("llama-server")
     rows.append(
@@ -418,12 +564,36 @@ def _doctor_command(args: argparse.Namespace) -> int:
         model_path = Path(str(model_value)).expanduser()
         if model_path.is_file():
             rows.append(("Model", f"{model_path} {theme.paint('ok', GREEN)}"))
+            size_gb = model_path.stat().st_size / (1024**3)
+            fit = model_fit(specs, size_gb)
+            style = GREEN if fit == "comfortable" else YELLOW if fit == "tight" else RED
+            rows.append(("Model fit", theme.paint(fit, style)))
         else:
             rows.append(("Model", f"{model_path} {theme.paint('missing', RED)}"))
             healthy = False
 
     print(render_kv("Environment check", rows, theme))
     return 0 if healthy else 1
+
+
+def _suggest_command(args: argparse.Namespace) -> int:
+    specs = detect_hardware()
+    rows = catalog_rows(specs)
+    if getattr(args, "json", False):
+        print(json.dumps(rows, indent=2))
+        return 0
+
+    theme = Theme(color_enabled())
+    print(render_suggestions(rows, catalog_budget(specs), theme))
+    recommended = next((row for row in rows if row["recommended"]), None)
+    if recommended:
+        print(f"\nDownload the recommended model with:\n  fastloadai download {recommended['repo']}")
+    else:
+        print(
+            "\nNo catalog model fits comfortably. Try a smaller repository or "
+            "download with --prefer speed --force."
+        )
+    return 0
 
 
 def _quantize_command(args: argparse.Namespace) -> int:
@@ -454,19 +624,38 @@ def build_parser() -> argparse.ArgumentParser:
     plan = commands.add_parser("plan", help="Build a runtime config for this machine.")
     plan.add_argument("model", nargs="?", help="Path to a local GGUF file.")
     plan.add_argument("--output", type=Path, default=DEFAULT_CONFIG)
+    plan.add_argument(
+        "--low-memory",
+        action="store_true",
+        help="Force a smaller context and small batches on constrained machines.",
+    )
 
     download = commands.add_parser("download", help="Download a GGUF quantization from Hugging Face.")
     download.add_argument("repo", help="Repository ID, for example org/model-GGUF.")
     download.add_argument("--file", help="Explicit GGUF file or shard to download.")
     download.add_argument("--directory", type=Path, default=Path("models"))
     download.add_argument("--output", type=Path, default=DEFAULT_CONFIG)
-    download.add_argument("--token", help="Hugging Face token for gated or private repositories.")
+    download.add_argument("--token", help="Hugging Face token; HF_TOKEN is used as a fallback.")
+    download.add_argument("--revision", help="Hugging Face revision, branch, tag or commit.")
+    download.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show the selected file and memory fit without downloading.",
+    )
+    download.add_argument(
+        "--force",
+        action="store_true",
+        help="Download even when the model does not fit the estimated memory.",
+    )
     download.add_argument(
         "--prefer",
         choices=("speed", "balanced", "quality"),
         default="balanced",
         help="Quantization trade-off when several files fit. Default: balanced.",
     )
+
+    suggest = commands.add_parser("suggest", help="Recommend small models that fit this machine.")
+    suggest.add_argument("--json", action="store_true", help="Print raw JSON instead of a table.")
 
     models = commands.add_parser("models", help="List downloaded GGUF models.")
     models.add_argument("--models-dir", type=Path, default=Path("models"))
@@ -487,6 +676,11 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--temperature", type=float, default=0.7, help="Sampling temperature. Default: 0.7.")
     run.add_argument("--max-tokens", type=int, help="Maximum tokens per answer.")
     run.add_argument("--system", help="Replace the default system prompt.")
+    run.add_argument(
+        "--low-memory",
+        action="store_true",
+        help="Force a smaller context and small batches on constrained machines.",
+    )
     run.add_argument("--no-color", action="store_true", help="Disable colored output.")
 
     quantize = commands.add_parser("quantize", help="Quantize a local GGUF with llama-quantize.")
@@ -510,6 +704,8 @@ def main() -> int:
         return _plan_command(args)
     if args.command == "download":
         return _download_command(args)
+    if args.command == "suggest":
+        return _suggest_command(args)
     if args.command == "models":
         return _models_command(args)
     if args.command == "doctor":

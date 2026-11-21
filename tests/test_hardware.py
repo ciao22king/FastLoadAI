@@ -1,24 +1,32 @@
 import argparse
 import io
 import json
+import os
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest.mock import patch
 
+from fastloadai.catalog import catalog_rows
 from fastloadai.chat import trim_history
 from fastloadai.cli import (
     _doctor_command,
+    _download_command,
+    _hf_token,
     _models_command,
     _plan_command,
     _quant_label,
     _run_command,
     _select_gguf,
+    _suggest_command,
     build_parser,
 )
 from fastloadai.hardware import (
     HardwareSpecs,
+    _macos_available_ram_gb,
+    model_fit,
     recommend_settings,
     recommended_context_size,
     usable_model_memory_gb,
@@ -262,6 +270,162 @@ class HardwareRecommendationTests(unittest.TestCase):
 
         self.assertEqual(len(messages), 2)
         self.assertEqual(messages[-1]["content"], "recent")
+
+    def test_model_fit_uses_available_memory(self):
+        specs = HardwareSpecs(cpu_threads=4, ram_gb=8, available_ram_gb=3.0)
+
+        self.assertEqual(model_fit(specs, 0.5), "comfortable")
+        self.assertEqual(model_fit(specs, 1.1), "tight")
+        self.assertEqual(model_fit(specs, 2.0), "too_large")
+        self.assertEqual(model_fit(specs, 0.0), "unknown")
+
+    def test_macos_available_memory_uses_vm_stat(self):
+        def fake_run(command, **kwargs):
+            if command[0] == "sysctl":
+                return SimpleNamespace(stdout="17179869184\n")
+            return SimpleNamespace(
+                stdout=(
+                    "Mach Virtual Memory Statistics: (page size of 16384 bytes)\n"
+                    "Pages free: 100000.\n"
+                    "Pages inactive: 50000.\n"
+                    "Pages speculative: 25000.\n"
+                )
+            )
+
+        with patch("fastloadai.hardware.subprocess.run", side_effect=fake_run):
+            available = _macos_available_ram_gb()
+
+        self.assertAlmostEqual(available, 175000 * 16384 / (1024**3))
+
+    def test_apple_unified_memory_offloads_only_when_model_fits(self):
+        specs = HardwareSpecs(
+            cpu_threads=8,
+            ram_gb=16,
+            gpu_name="Apple Silicon (Metal)",
+            gpu_vram_gb=11.2,
+            available_ram_gb=8.0,
+            unified_memory=True,
+        )
+
+        self.assertEqual(
+            recommend_settings(specs, model_size_bytes=1024**3)["n_gpu_layers"], 99
+        )
+        self.assertEqual(
+            recommend_settings(specs, model_size_bytes=20 * 1024**3)["n_gpu_layers"], 0
+        )
+
+    def test_low_memory_mode_reduces_context_and_batches(self):
+        specs = HardwareSpecs(cpu_threads=4, ram_gb=4, available_ram_gb=3.5)
+        settings = recommend_settings(specs, model_size_bytes=2 * 1024**3)
+
+        self.assertTrue(settings["low_memory"])
+        self.assertEqual(settings["model_fit"], "too_large")
+        self.assertEqual(settings["context_size"], 512)
+
+    def test_catalog_recommends_a_model_that_fits(self):
+        specs = HardwareSpecs(cpu_threads=4, ram_gb=4, available_ram_gb=3.5)
+        rows = catalog_rows(specs)
+
+        recommended = [row for row in rows if row["recommended"]]
+        self.assertEqual(len(recommended), 1)
+        self.assertEqual(recommended[0]["fit"], "comfortable")
+        self.assertLessEqual(float(recommended[0]["size_gb"]), 1.0)
+
+    def test_two_gb_laptop_gets_a_small_recommendation(self):
+        specs = HardwareSpecs(cpu_threads=2, ram_gb=2, available_ram_gb=1.8)
+        rows = catalog_rows(specs)
+
+        recommended = [row for row in rows if row["recommended"]]
+        self.assertEqual(len(recommended), 1)
+        self.assertEqual(recommended[0]["repo"], "Qwen/Qwen2.5-0.5B-Instruct-GGUF")
+
+    def test_hf_token_falls_back_to_environment(self):
+        with patch.dict(os.environ, {"HF_TOKEN": "hf_test"}, clear=True):
+            self.assertEqual(_hf_token(argparse.Namespace(token=None)), "hf_test")
+
+    def test_parser_accepts_suggest_and_download_controls(self):
+        parser = build_parser()
+        self.assertEqual(parser.parse_args(["suggest"]).command, "suggest")
+        download = parser.parse_args(
+            ["download", "org/model-GGUF", "--dry-run", "--force", "--revision", "main"]
+        )
+        self.assertTrue(download.dry_run)
+        self.assertTrue(download.force)
+        self.assertEqual(download.revision, "main")
+        self.assertTrue(parser.parse_args(["plan", "--low-memory"]).low_memory)
+
+    def test_download_dry_run_reports_fit_without_downloading(self):
+        specs = HardwareSpecs(cpu_threads=4, ram_gb=4, available_ram_gb=3.5)
+        siblings = [SimpleNamespace(rfilename="model-Q4_K_M.gguf", size=100 * 1024**2)]
+        api = SimpleNamespace(
+            model_info=lambda repo, files_metadata=True, revision=None: SimpleNamespace(
+                siblings=siblings
+            )
+        )
+        args = argparse.Namespace(
+            repo="org/model-GGUF",
+            file=None,
+            directory=Path("/tmp/unused"),
+            output=Path("/tmp/unused/config.json"),
+            token=None,
+            revision=None,
+            dry_run=True,
+            force=False,
+            prefer="balanced",
+        )
+
+        output = io.StringIO()
+        with patch("fastloadai.cli.detect_hardware", return_value=specs), patch(
+            "huggingface_hub.HfApi", return_value=api
+        ), patch("huggingface_hub.hf_hub_download") as download, redirect_stdout(output):
+            self.assertEqual(_download_command(args), 0)
+
+        download.assert_not_called()
+        self.assertIn("comfortable", output.getvalue())
+
+    def test_download_refuses_too_large_model_without_force(self):
+        specs = HardwareSpecs(cpu_threads=4, ram_gb=4, available_ram_gb=3.5)
+        siblings = [SimpleNamespace(rfilename="model-Q4_K_M.gguf", size=20 * 1024**3)]
+        api = SimpleNamespace(
+            model_info=lambda repo, files_metadata=True, revision=None: SimpleNamespace(
+                siblings=siblings
+            )
+        )
+        args = argparse.Namespace(
+            repo="org/model-GGUF",
+            file=None,
+            directory=Path("/tmp/unused"),
+            output=Path("/tmp/unused/config.json"),
+            token=None,
+            revision=None,
+            dry_run=False,
+            force=False,
+            prefer="balanced",
+        )
+
+        output = io.StringIO()
+        errors = io.StringIO()
+        with patch("fastloadai.cli.detect_hardware", return_value=specs), patch(
+            "huggingface_hub.HfApi", return_value=api
+        ), patch("huggingface_hub.hf_hub_download") as download, redirect_stdout(
+            output
+        ), redirect_stderr(errors):
+            self.assertEqual(_download_command(args), 1)
+
+        download.assert_not_called()
+        self.assertIn("too_large", output.getvalue())
+        self.assertIn("No quantization fits", errors.getvalue())
+
+    def test_suggest_json_marks_one_recommendation(self):
+        specs = HardwareSpecs(cpu_threads=4, ram_gb=4, available_ram_gb=3.5)
+        output = io.StringIO()
+        with patch("fastloadai.cli.detect_hardware", return_value=specs), redirect_stdout(
+            output
+        ):
+            self.assertEqual(_suggest_command(argparse.Namespace(json=True)), 0)
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(sum(1 for row in payload if row["recommended"]), 1)
 
 
 if __name__ == "__main__":

@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from fastloadai.chat import build_server_command
+from fastloadai.chat import _is_memory_error, build_server_command
 from fastloadai.hardware import HardwareSpecs
 from fastloadai.tui import (
     ChatStats,
@@ -45,6 +45,18 @@ class ServerCommandTests(unittest.TestCase):
         config = {**CONFIG, "mmap": False}
         command = build_server_command("llama-server", Path("/models/x.gguf"), config, 8123)
         self.assertIn("--no-mmap", command)
+
+    def test_build_server_command_uses_small_batches_in_low_memory(self):
+        config = {**CONFIG, "low_memory": True}
+        command = build_server_command("llama-server", Path("/models/x.gguf"), config, 8123)
+        self.assertIn("--batch-size", command)
+        self.assertIn("128", command)
+        self.assertIn("--ubatch-size", command)
+
+    def test_memory_errors_are_recognized(self):
+        self.assertTrue(_is_memory_error("llama_model_load: failed to allocate buffer"))
+        self.assertTrue(_is_memory_error("std::bad_alloc"))
+        self.assertFalse(_is_memory_error("invalid model file"))
 
 
 class ThemeTests(unittest.TestCase):

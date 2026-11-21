@@ -150,6 +150,8 @@ def render_banner(
     if isinstance(gpu_layers, int):
         details.append("CPU only" if gpu_layers == 0 else f"GPU layers {gpu_layers}")
     details.append("mmap on" if config.get("mmap", True) else "mmap off")
+    if config.get("low_memory"):
+        details.append("low memory")
     model_size = config.get("model_size_gb")
     if isinstance(model_size, (int, float)) and model_size > 0:
         details.append(format_size(float(model_size)))
@@ -254,16 +256,45 @@ def render_timing(seconds: float, text: str, theme: Theme) -> str:
 
 
 def render_hardware(specs: HardwareSpecs, theme: Theme) -> str:
+    memory = format_size(specs.ram_gb)
+    if specs.available_ram_gb:
+        memory += f" ({format_size(specs.available_ram_gb)} free)"
     rows = [
         ("CPU threads", str(specs.cpu_threads)),
-        ("System RAM", format_size(specs.ram_gb)),
+        ("System RAM", memory),
     ]
+    if specs.disk_free_gb:
+        rows.append(("Disk free", format_size(specs.disk_free_gb)))
     if specs.gpu_name:
-        rows.append(("GPU", f"{specs.gpu_name} ({format_size(specs.gpu_vram_gb)} VRAM)"))
+        kind = "unified memory" if specs.unified_memory else "VRAM"
+        rows.append(("GPU", f"{specs.gpu_name} ({format_size(specs.gpu_vram_gb)} {kind})"))
     else:
         rows.append(("GPU", "none (CPU only)"))
+    if specs.is_laptop:
+        rows.append(("Form factor", "laptop"))
     rows.append(("Model budget", format_size(usable_model_memory_gb(specs))))
     return render_kv("Hardware detected", rows, theme)
+
+
+def render_suggestions(
+    rows: Sequence[Mapping[str, Any]],
+    budget_gb: float,
+    theme: Theme,
+) -> str:
+    lines = [
+        theme.paint("Suggested models", BOLD),
+        f"  budget {format_size(budget_gb)} · * recommended",
+        "",
+    ]
+    for row in rows:
+        fit = str(row.get("fit", "unknown"))
+        style = GREEN if fit == "comfortable" else YELLOW if fit == "tight" else RED
+        marker = "*" if row.get("recommended") else " "
+        name = str(row.get("name", ""))
+        size = format_size(float(row.get("size_gb") or 0))
+        lines.append(f"  {marker} {name:<28} {size:>8}  {theme.paint(fit, style)}")
+        lines.append(f"    {theme.paint(str(row.get('repo', '')), DIM)}")
+    return "\n".join(lines)
 
 
 def render_plan(
@@ -275,11 +306,14 @@ def render_plan(
     rows = [
         ("Model", str(model_path) if model_path else "not specified"),
         ("Model size", format_size(float(config.get("model_size_gb") or 0))),
+        ("Model fit", str(config.get("model_fit", "unknown"))),
         ("Context", str(config.get("context_size", "unknown"))),
         ("Threads", str(config.get("cpu_threads", "unknown"))),
         ("GPU layers", str(config.get("n_gpu_layers", 0))),
         ("mmap", "on" if config.get("mmap", True) else "off"),
         ("Memory budget", format_size(float(config.get("usable_model_memory_gb") or 0))),
-        ("Config file", output),
     ]
+    if config.get("low_memory"):
+        rows.append(("Low memory mode", "on"))
+    rows.append(("Config file", output))
     return render_kv("Runtime plan", rows, theme)
