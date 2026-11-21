@@ -9,7 +9,7 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from fastloadai.catalog import catalog_rows
+from fastloadai.catalog import catalog_match, catalog_rows
 from fastloadai.chat import trim_history
 from fastloadai.cli import (
     _doctor_command,
@@ -187,16 +187,35 @@ class HardwareRecommendationTests(unittest.TestCase):
             self.assertEqual(updated_config["context_size"], 4096)
             self.assertEqual(updated_config["model_repo"], "test-org/test-model-GGUF")
 
-    def test_run_without_config_auto_downloads_the_recommendation(self):
+    def test_run_without_a_model_explains_how_to_start(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            args = build_parser().parse_args(
+                [
+                    "run",
+                    "--config",
+                    str(root / "fastloadai-config.json"),
+                    "--models-dir",
+                    str(root / "models"),
+                ]
+            )
+            errors = io.StringIO()
+            with redirect_stderr(errors):
+                self.assertEqual(_run_command(args), 2)
+
+        self.assertIn("Pass a model name", errors.getvalue())
+
+    def test_run_with_catalog_name_auto_downloads_that_model(self):
         specs = HardwareSpecs(cpu_threads=4, ram_gb=4, available_ram_gb=3.5)
         with TemporaryDirectory() as directory:
             root = Path(directory)
             models_dir = root / "models"
             config_path = root / "fastloadai-config.json"
-            model_path = models_dir / "auto-Q4_K_M.gguf"
+            model_path = models_dir / "qwen-Q4_K_M.gguf"
             args = build_parser().parse_args(
                 [
                     "run",
+                    "qwen2.5-0.5b",
                     "--config",
                     str(config_path),
                     "--models-dir",
@@ -231,9 +250,20 @@ class HardwareRecommendationTests(unittest.TestCase):
                 self.assertEqual(_run_command(args), 0)
 
             self.assertEqual(
-                download.call_args.args[1], "Qwen/Qwen2.5-1.5B-Instruct-GGUF"
+                download.call_args.args[1], "Qwen/Qwen2.5-0.5B-Instruct-GGUF"
             )
             self.assertEqual(run_chat.call_args.args[0], model_path.resolve())
+
+    def test_catalog_name_matching_is_fuzzy_but_unambiguous(self):
+        self.assertEqual(
+            catalog_match("qwen2.5-0.5b").repo,
+            "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
+        )
+        self.assertEqual(
+            catalog_match("SmolLM2 135M").repo,
+            "unsloth/SmolLM2-135M-Instruct-GGUF",
+        )
+        self.assertIsNone(catalog_match("qwen"))
 
     def test_run_with_repo_id_auto_downloads_that_repository(self):
         specs = HardwareSpecs(cpu_threads=4, ram_gb=8, available_ram_gb=6)

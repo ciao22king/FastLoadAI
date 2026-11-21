@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
-from .catalog import catalog_budget, catalog_rows
+from .catalog import catalog_budget, catalog_match, catalog_rows
 from .chat import run_chat
 from .hardware import (
     detect_hardware,
@@ -404,45 +404,25 @@ def _run_command(args: argparse.Namespace) -> int:
             config = loaded_config
 
         requested_model = args.model
-        if requested_model and _is_repo_reference(requested_model):
-            if not shutil.which("llama-server"):
-                print(
-                    "llama-server not found. Install llama.cpp before running a model.",
-                    file=sys.stderr,
+        model_path: Path | None = None
+        if requested_model:
+            try:
+                model_path = _resolve_run_model(
+                    requested_model, config, args.models_dir
                 )
-                return 2
-            print(f"Preparing {requested_model} for this machine...")
-            code = _download_for_run(args, requested_model)
-            if code:
-                return code
-            config = json.loads(args.config.read_text(encoding="utf-8"))
-            requested_model = None
-        elif not requested_model:
-            configured_value = config.get("model_path")
-            configured_path = (
-                Path(configured_value).expanduser() if configured_value else None
-            )
-            if configured_path is None or not configured_path.is_file():
-                repo = str(config.get("model_repo") or "")
-                if repo:
-                    print(f"Model file is missing. Downloading {repo} again.")
-                else:
-                    specs_for_choice = detect_hardware()
-                    rows = catalog_rows(specs_for_choice)
-                    recommended = next(
-                        (row for row in rows if row["recommended"]), None
-                    )
-                    if recommended is None:
-                        print(
-                            "No model configured and no catalog model fits this machine. "
-                            "Use fastloadai download --force or pass a local GGUF file.",
-                            file=sys.stderr,
-                        )
-                        return 2
-                    repo = str(recommended["repo"])
-                    print(
-                        f"No model configured. Selected {recommended['name']} "
-                        f"for a {format_size(catalog_budget(specs_for_choice))} budget."
+            except ValueError:
+                model_path = None
+
+            if model_path is None or not model_path.is_file():
+                repo = requested_model if _is_repo_reference(requested_model) else None
+                if repo is None:
+                    matched = catalog_match(requested_model)
+                    repo = matched.repo if matched else None
+                if repo is None:
+                    raise ValueError(
+                        f"Model '{requested_model}' was not found. Use a downloaded "
+                        "name, a Hugging Face repo ID, or a catalog name such as "
+                        "qwen2.5-0.5b."
                     )
                 if not shutil.which("llama-server"):
                     print(
@@ -450,13 +430,38 @@ def _run_command(args: argparse.Namespace) -> int:
                         file=sys.stderr,
                     )
                     return 2
+                print(f"Preparing {requested_model} for this machine...")
                 code = _download_for_run(args, repo)
                 if code:
                     return code
                 config = json.loads(args.config.read_text(encoding="utf-8"))
+                model_path = _resolve_run_model(None, config, args.models_dir)
+        else:
+            configured_value = config.get("model_path")
+            configured_path = (
+                Path(configured_value).expanduser() if configured_value else None
+            )
+            if configured_path is None or not configured_path.is_file():
+                repo = str(config.get("model_repo") or "")
+                if not repo:
+                    raise ValueError(
+                        "No model configured. Pass a model name, for example "
+                        "'fastloadai run qwen2.5-0.5b', or run download first."
+                    )
+                if not shutil.which("llama-server"):
+                    print(
+                        "llama-server not found. Install llama.cpp before running a model.",
+                        file=sys.stderr,
+                    )
+                    return 2
+                print(f"Model file is missing. Downloading {repo} again.")
+                code = _download_for_run(args, repo)
+                if code:
+                    return code
+                config = json.loads(args.config.read_text(encoding="utf-8"))
+            model_path = _resolve_run_model(None, config, args.models_dir)
 
-        model_path = _resolve_run_model(requested_model, config, args.models_dir)
-        if not model_path.is_file():
+        if model_path is None or not model_path.is_file():
             raise ValueError(f"Model file not found: {model_path}")
     except (OSError, json.JSONDecodeError, ValueError) as error:
         print(f"Invalid configuration: {error}", file=sys.stderr)
@@ -661,7 +666,10 @@ def _suggest_command(args: argparse.Namespace) -> int:
     print(render_suggestions(rows, catalog_budget(specs), theme))
     recommended = next((row for row in rows if row["recommended"]), None)
     if recommended:
-        print("\nRun the recommended model with:\n  fastloadai run")
+        print(
+            "\nRun the recommended model with:\n"
+            f"  fastloadai run {recommended['repo']}"
+        )
     else:
         print(
             "\nNo catalog model fits comfortably. Try a smaller repository or "
@@ -742,7 +750,10 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "model",
         nargs="?",
-        help="Model name, GGUF path, or Hugging Face repo ID. Omit it to auto-select one.",
+        help=(
+            "Model name, GGUF path, or Hugging Face repo ID. "
+            "Omit it to reuse the configured model."
+        ),
     )
     run.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     run.add_argument("--models-dir", type=Path, default=Path("models"))

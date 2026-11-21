@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from .hardware import HardwareSpecs, model_fit, usable_model_memory_gb
@@ -27,6 +28,24 @@ CATALOG: tuple[CatalogModel, ...] = (
     CatalogModel("Qwen2.5 7B Instruct", "Qwen/Qwen2.5-7B-Instruct-GGUF", 4.70, "needs 10 GB+"),
     CatalogModel("Llama 3.1 8B Instruct", "unsloth/Llama-3.1-8B-Instruct-GGUF", 5.00, "needs 12 GB+"),
 )
+
+
+def _normalize_name(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
+
+
+def catalog_match(query: str) -> CatalogModel | None:
+    """Match a short model name such as ``qwen2.5-0.5b`` to the catalog."""
+    normalized = _normalize_name(query)
+    if not normalized:
+        return None
+    matches = [
+        model
+        for model in CATALOG
+        if normalized in _normalize_name(model.name)
+        or normalized in _normalize_name(model.repo)
+    ]
+    return matches[0] if len(matches) == 1 else None
 
 
 def catalog_rows(specs: HardwareSpecs) -> list[dict[str, object]]:

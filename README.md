@@ -23,10 +23,10 @@ A Docker image is included for machines where you do not want to install Python 
 ```bash
 docker build -t fastloadai .
 docker volume create fastloadai-data
-docker run --rm -it -v fastloadai-data:/data fastloadai run
+docker run --rm -it -v fastloadai-data:/data fastloadai run qwen2.5-0.5b
 ```
 
-`run` detects the container limits, picks a model that fits, downloads the best quantization and starts the chat. You do not need a separate download command. The `/data` volume keeps models, the Hugging Face cache and `fastloadai-config.json` between runs. Add `-e HF_TOKEN=...` for gated repositories. `--memory=4g` limits the container; FastLoadAI reads the cgroup limit, so it chooses settings that fit that limit. Use `run --low-memory` on very small limits.
+`run <model name>` detects the container limits, picks the best quantization for that model, downloads it and starts the chat. You do not need a separate download command when you name the model. The `/data` volume keeps models, the Hugging Face cache and `fastloadai-config.json` between runs. Add `-e HF_TOKEN=...` for gated repositories. `--memory=4g` limits the container; FastLoadAI reads the cgroup limit, so it chooses settings that fit that limit. Use `run --low-memory` on very small limits.
 
 To pre-download without starting the chat:
 
@@ -38,7 +38,7 @@ The same workflow is available with Compose:
 
 ```bash
 docker compose build
-docker compose run --rm fastloadai run
+docker compose run --rm fastloadai run qwen2.5-0.5b
 ```
 
 The image uses the CPU build of `llama.cpp`. For GPU acceleration, use the native installer with a suitable `llama.cpp` build.
@@ -55,6 +55,7 @@ fastloadai download Qwen/Qwen2.5-7B-Instruct-GGUF --dry-run
 fastloadai models
 fastloadai doctor
 fastloadai run
+fastloadai run qwen2.5-0.5b
 fastloadai run Qwen/Qwen2.5-0.5B-Instruct-GGUF
 fastloadai run Llama-3.2-3B
 fastloadai run --prompt "Introduce yourself." --once
@@ -67,7 +68,7 @@ fastloadai --version
 
 `scan` prints the detected hardware as a readable table: CPU threads, total and free RAM, free disk, GPU, and the estimated model budget. Add `--json` to get the raw JSON object instead.
 
-`suggest` lists small models that fit this machine and marks the best recommendation for the available memory and CPU. The fastest way to start on a low-spec laptop or a machine without a GPU is simply `fastloadai run`: it picks the recommendation and downloads it. Add `--json` for scripts.
+`suggest` lists small models that fit this machine and marks the best recommendation for the available memory and CPU. It prints the exact `run` command for the recommendation, so on a low-spec laptop you can copy that one line and let FastLoadAI download and configure the model. Add `--json` for scripts.
 
 `download` looks at the GGUF files in the repository and picks the best quantization that fits the estimated memory. `--prefer balanced` (default) targets a 4–5 bit K-quant, `speed` targets 4 bit, and `quality` targets 8 bit. Use `--file` to pick an explicit file. `--dry-run` shows the selected file and its memory fit without downloading. If no quantization fits, FastLoadAI refuses to download unless you pass `--force`; it also checks free disk space first. Sharded models are downloaded together. Gated or private repositories need `--token`, `HF_TOKEN`, or a logged-in Hugging Face session. Use `--revision` for a branch, tag or commit.
 
@@ -77,7 +78,7 @@ fastloadai --version
 
 `plan` writes a runtime config for the current machine. It prints a summary and saves the JSON file; use it when you already have a local GGUF.
 
-`run` recalculates and saves the settings for the detected hardware, starts `llama-server` on `127.0.0.1` only, and opens the FastLoadAI chat with streaming responses and history. Omit the model name to reuse the configured model. If no model is configured, `run` selects the best catalog model for this machine, downloads the quantization that fits, and starts the chat in one command. Pass a Hugging Face repo ID to do the same for that repository, or pass a name from the recorded repository or the `models` folder. If more than one file matches, pass the full GGUF path. `--prefer` controls the quantization trade-off for auto-downloads, and `--token`, `--revision` and `--force` work like they do for `download`. `--prompt` sends a first message; `--once` answers it and exits, which also happens automatically when stdin is not a terminal. Tune a session with `--threads`, `--ctx-size`, `--gpu-layers`, `--temperature`, `--max-tokens` and `--system`. `--low-memory` forces a small context and small batches, which helps on 2–4 GB laptops. `--no-color` disables colors for logs and CI. If the model is larger than the estimated memory, FastLoadAI warns before starting and suggests a smaller quantization; if `llama-server` runs out of memory, the error includes the same advice.
+`run` recalculates and saves the settings for the detected hardware, starts `llama-server` on `127.0.0.1` only, and opens the FastLoadAI chat with streaming responses and history. Pass a short catalog name such as `qwen2.5-0.5b`, a Hugging Face repo ID, a name from the recorded repository, or a local GGUF path. If the model is not local, `run` downloads the best quantization for this machine and starts the chat in one command. Omit the model name to reuse the configured model; if there is no config, `run` asks for a model name. If more than one file matches, pass the full GGUF path. `--prefer` controls the quantization trade-off for auto-downloads, and `--token`, `--revision` and `--force` work like they do for `download`. `--prompt` sends a first message; `--once` answers it and exits, which also happens automatically when stdin is not a terminal. Tune a session with `--threads`, `--ctx-size`, `--gpu-layers`, `--temperature`, `--max-tokens` and `--system`. `--low-memory` forces a small context and small batches, which helps on 2–4 GB laptops. `--no-color` disables colors for logs and CI. If the model is larger than the estimated memory, FastLoadAI warns before starting and suggests a smaller quantization; if `llama-server` runs out of memory, the error includes the same advice.
 
 Inside the chat, `/help` lists the commands, `/stats` shows session speed and token estimates, `/context` shows how much of the window the conversation uses, `/retry` regenerates the last answer, `/clear` resets the conversation, and `/exit` (or `/quit`) closes the session and the server. History is trimmed by token budget, not by a fixed message count, so long chats stay inside the context window. The chat does not include the file-editing and shell tools of the OpenCode agent.
 
