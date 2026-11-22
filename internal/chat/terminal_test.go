@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ciao22king/FastLoadAI/internal/model"
 	"github.com/ciao22king/FastLoadAI/internal/tui"
 )
 
@@ -119,5 +120,54 @@ func TestConversationCacheRebuildsAfterClear(t *testing.T) {
 	second := ui.conversationLines()
 	if len(second) == 0 || second[0] == first[0] {
 		t.Fatalf("cache was not rebuilt: %#v", second)
+	}
+}
+
+func TestWelcomeLinesFitWidth(t *testing.T) {
+	ui := &terminalChat{width: 80, theme: tui.Theme{}, config: model.Config{ModelPath: "qwen.gguf", Quantization: "BF16", ContextSize: 4096}}
+	lines := ui.welcomeLines()
+	if len(lines) < 5 {
+		t.Fatalf("welcome has %d lines", len(lines))
+	}
+	for _, line := range lines {
+		if tui.VisibleWidth(line) > 80 {
+			t.Fatalf("welcome line too wide: %q", line)
+		}
+	}
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "FastLoadAI is ready") || !strings.Contains(joined, "qwen.gguf") {
+		t.Fatalf("welcome content: %q", joined)
+	}
+}
+
+func TestTranscriptMarkdown(t *testing.T) {
+	ui := &terminalChat{
+		config: model.Config{ModelPath: "qwen.gguf", Quantization: "BF16", ContextSize: 4096},
+		transcript: []chatItem{
+			{role: "user", content: "hello"},
+			{role: "assistant", content: "hi"},
+		},
+	}
+	text := ui.transcriptMarkdown()
+	for _, want := range []string{"# FastLoadAI chat", "## You", "hello", "## FastLoadAI", "hi", "qwen.gguf"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("markdown missing %q: %s", want, text)
+		}
+	}
+}
+
+func TestLastAssistant(t *testing.T) {
+	ui := &terminalChat{transcript: []chatItem{{role: "user", content: "q"}, {role: "assistant", content: "a"}}}
+	if got := ui.lastAssistant(); got != "a" {
+		t.Fatalf("lastAssistant = %q", got)
+	}
+}
+
+func TestRenderAssistantHeading(t *testing.T) {
+	ui := &terminalChat{width: 60, theme: tui.Theme{}}
+	lines := ui.renderAssistant("# Title\n- item", false)
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "Title") || !strings.Contains(joined, "• item") {
+		t.Fatalf("formatted output: %q", joined)
 	}
 }

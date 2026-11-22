@@ -12,6 +12,7 @@ import (
 	"github.com/ciao22king/FastLoadAI/internal/hf"
 	"github.com/ciao22king/FastLoadAI/internal/model"
 	"github.com/ciao22king/FastLoadAI/internal/optimization"
+	"github.com/ciao22king/FastLoadAI/internal/safetensors"
 	"github.com/ciao22king/FastLoadAI/internal/tui"
 )
 
@@ -86,16 +87,26 @@ func performDownload(ctx context.Context, opts downloadOptions, theme tui.Theme)
 		return model.Config{}, 1
 	}
 	group, err := hf.SelectGGUF(hf.GGUFGroups(info.Siblings), budget, opts.File, opts.Prefer)
+	convertSafetensors := false
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Cannot use %s: %v\n", opts.Repo, err)
-		fmt.Fprintln(os.Stderr, "Choose a repository with GGUF files, usually one whose name ends in -GGUF.")
-		return model.Config{}, 1
+		group, err = selectSafetensorsGroup(info.Siblings)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Cannot use %s: %v\n", opts.Repo, err)
+			fmt.Fprintln(os.Stderr, "Choose a repository with GGUF files or a Hugging Face safetensors checkpoint.")
+			return model.Config{}, 1
+		}
+		convertSafetensors = true
 	}
 	sizeGB := hf.GroupSizeGB(group)
 	fit := hardware.ModelFit(specs, sizeGB)
 	workers := hf.ClampWorkers(opts.Workers, len(group.Files))
+	format := "GGUF"
+	if convertSafetensors {
+		format = "safetensors → GGUF"
+	}
 	rows := [][2]string{
 		{"Repository", opts.Repo},
+		{"Format", format},
 		{"File", group.Name},
 		{"Files", fmt.Sprintf("%d", len(group.Files))},
 		{"Parallel", workerLabel(workers)},
@@ -146,17 +157,40 @@ func performDownload(ctx context.Context, opts downloadOptions, theme tui.Theme)
 		return model.Config{}, 1
 	}
 	if len(paths) == 0 {
-		fmt.Fprintln(os.Stderr, "Download finished without a GGUF file.")
+		fmt.Fprintln(os.Stderr, "Download finished without model files.")
 		return model.Config{}, 1
 	}
 	modelPath := absModelPath(paths[0])
 	sizeBytes := group.Size
+	quantization := hf.QuantLabel(group.Name)
+	quantizationFile := group.Name
+	if convertSafetensors {
+		if !safetensors.IsModelDir(localDir) {
+			fmt.Fprintf(os.Stderr, "Downloaded safetensors to %s, but the checkpoint is incomplete.\n", localDir)
+			return model.Config{}, 1
+		}
+		fmt.Fprintln(os.Stderr, "Converting safetensors to GGUF...")
+		converted, err := safetensors.EnsureConverted(localDir, opts.Directory)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Conversion failed: %v\n", err)
+			return model.Config{}, 1
+		}
+		modelPath = absModelPath(converted)
+		if info, err := os.Stat(modelPath); err == nil {
+			sizeBytes = info.Size()
+		}
+		quantization, _ = safetensors.NativeDtype(localDir)
+		if quantization == "" {
+			quantization = "native"
+		}
+		quantizationFile = filepath.Base(modelPath)
+	}
 	cfg := hardware.RecommendSettings(specs, modelPath, sizeBytes)
 	cfg.ModelPath = modelPath
 	cfg.ModelRepo = opts.Repo
 	cfg.Revision = opts.Revision
-	cfg.Quantization = hf.QuantLabel(group.Name)
-	cfg.QuantizationFile = group.Name
+	cfg.Quantization = quantization
+	cfg.QuantizationFile = quantizationFile
 	cfg.ModelSizeBytes = sizeBytes
 	cfg = optimization.Apply(cfg, modelPath, opts.Repo, opts.Optimize)
 	if err := saveConfig(opts.Output, cfg); err != nil {
@@ -179,6 +213,39 @@ func performDownload(ctx context.Context, opts downloadOptions, theme tui.Theme)
 	rows = append(rows, [2]string{"Config file", opts.Output})
 	fmt.Println(tui.RenderKV("Model ready", rows, theme, "  "))
 	return cfg, 0
+}
+
+func selectSafetensorsGroup(siblings []hf.Sibling) (hf.Group, error) {
+	required := map[string]bool{
+		"config.json": true, "tokenizer.json": true, "tokenizer_config.json": true,
+		"generation_config.json": true, "model.safetensors.index.json": true,
+		"special_tokens_map.json": true, "vocab.json": true, "merges.txt": true,
+	}
+	group := hf.Group{Name: "safetensors checkpoint", FileSizes: map[string]int64{}, SizeKnown: true}
+	for _, sibling := range siblings {
+		name := sibling.Filename
+		if !required[name] && !strings.HasSuffix(name, ".safetensors") {
+			continue
+		}
+		group.Files = append(group.Files, name)
+		if sibling.Size == nil {
+			group.SizeKnown = false
+			continue
+		}
+		group.FileSizes[name] = *sibling.Size
+		group.Size += *sibling.Size
+	}
+	hasWeights := false
+	for _, name := range group.Files {
+		if strings.HasSuffix(name, ".safetensors") {
+			hasWeights = true
+			break
+		}
+	}
+	if !hasWeights {
+		return hf.Group{}, fmt.Errorf("the repository has neither GGUF nor safetensors weights")
+	}
+	return group, nil
 }
 
 func workerLabel(workers int) string {

@@ -54,6 +54,8 @@ func run(args []string) int {
 		return commandRun(args[1:])
 	case "quantize":
 		return commandQuantize(args[1:])
+	case "convert":
+		return commandConvert(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command %q. Run fastloadai --help.\n", args[0])
 		return 2
@@ -69,7 +71,7 @@ Usage:
 Commands:
   scan       Detect CPU, RAM, GPU, disk and the model memory budget.
   suggest    Recommend catalog models that fit this machine.
-  download   Download a GGUF quantization from Hugging Face.
+  download   Download a GGUF or safetensors model from Hugging Face.
   plan       Build a runtime plan and write the config file.
   optimize   Detect MoE/GPU/memory and write the best llama.cpp flags.
   budget     Show how many parameters fit and how much stays in RAM/VRAM.
@@ -77,6 +79,7 @@ Commands:
   models     List downloaded GGUF models.
   doctor     Check the runtime, model files and configuration.
   quantize   Quantize a GGUF file with llama-quantize.
+  convert    Convert Hugging Face safetensors into a self-contained GGUF.
 
 Examples:
   fastloadai scan
@@ -88,7 +91,10 @@ Examples:
   fastloadai optimize qwen2.5-0.5b --profile speed
   fastloadai budget qwen2.5-0.5b --prompt "Explain step by step how TCP works"
   fastloadai download Qwen/Qwen2.5-0.5B-Instruct-GGUF --dry-run
+  fastloadai download Qwen/Qwen2.5-0.5B-Instruct
   fastloadai download Qwen/Qwen2.5-7B-Instruct-GGUF --workers 8
+  fastloadai run ./Qwen2.5-0.5B-Instruct --prompt "Hello"
+  fastloadai convert ./Qwen2.5-0.5B-Instruct --output ./models/qwen2.5-0.5b.gguf
   fastloadai models --json
 `)
 }

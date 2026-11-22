@@ -14,6 +14,7 @@ import (
 	"github.com/ciao22king/FastLoadAI/internal/hf"
 	"github.com/ciao22king/FastLoadAI/internal/model"
 	"github.com/ciao22king/FastLoadAI/internal/optimization"
+	"github.com/ciao22king/FastLoadAI/internal/safetensors"
 	"github.com/ciao22king/FastLoadAI/internal/tui"
 )
 
@@ -116,6 +117,19 @@ func commandRun(args []string) int {
 			fmt.Fprintf(os.Stderr, "Invalid configuration: %v\n", err)
 			return 2
 		}
+	}
+	if info, statErr := os.Stat(modelPath); statErr == nil && info.IsDir() {
+		if !safetensors.IsModelDir(modelPath) {
+			fmt.Fprintf(os.Stderr, "%s is a directory without config.json and *.safetensors\n", modelPath)
+			return 2
+		}
+		fmt.Fprintf(os.Stderr, "Converting safetensors to a self-contained GGUF in %s...\n", *modelsDir)
+		converted, convertErr := safetensors.EnsureConverted(modelPath, *modelsDir)
+		if convertErr != nil {
+			fmt.Fprintf(os.Stderr, "Conversion failed: %v\n", convertErr)
+			return 1
+		}
+		modelPath = converted
 	}
 	info, err := os.Stat(modelPath)
 	if err != nil || !info.Mode().IsRegular() {

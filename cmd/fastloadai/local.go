@@ -12,6 +12,7 @@ import (
 
 	"github.com/ciao22king/FastLoadAI/internal/hf"
 	"github.com/ciao22king/FastLoadAI/internal/model"
+	"github.com/ciao22king/FastLoadAI/internal/safetensors"
 )
 
 // LocalGroup is a downloaded GGUF file, or all shards of one model.
@@ -86,8 +87,13 @@ func resolveModel(requested string, cfg model.Config, modelsDir string) (string,
 		}
 		return configured, nil
 	}
-	if info, err := os.Stat(requested); err == nil && info.Mode().IsRegular() {
-		return absModelPath(requested), nil
+	if info, err := os.Stat(requested); err == nil {
+		if info.Mode().IsRegular() {
+			return absModelPath(requested), nil
+		}
+		if info.IsDir() && safetensors.IsModelDir(requested) {
+			return absModelPath(requested), nil
+		}
 	}
 	query := strings.ToLower(requested)
 	if configured != "" {

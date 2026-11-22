@@ -343,6 +343,8 @@ var helpEntries = [][2]string{
 	{"/stats", "Show session statistics"},
 	{"/context", "Show context window usage"},
 	{"/retry", "Regenerate the last answer"},
+	{"/copy", "Copy the last answer to the terminal clipboard"},
+	{"/save", "Save the conversation as Markdown"},
 	{"/exit", "Close the chat and stop the server"},
 }
 

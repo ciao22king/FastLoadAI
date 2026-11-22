@@ -2,9 +2,11 @@ package chat
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"time"
 	"unicode"
@@ -106,7 +108,7 @@ type terminalChat struct {
 
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
-var chatCommands = []string{"/help", "/clear", "/stats", "/context", "/retry", "/exit", "/quit"}
+var chatCommands = []string{"/help", "/clear", "/stats", "/context", "/retry", "/copy", "/save", "/exit", "/quit"}
 
 // runTerminalChat opens a full-screen chat when both stdin and stdout are TTYs.
 func runTerminalChat(server *llama.Server, config model.Config, options Options, theme tui.Theme, settings sessionSettings) (int, bool) {
@@ -399,6 +401,21 @@ func (ui *terminalChat) command(text string) {
 		ui.addInfo(ui.stats.RenderStats(tui.Theme{}), tui.Dim)
 	case "/context":
 		ui.addInfo(tui.RenderContext(tui.ConversationTokens(ui.messages), ui.config.ContextSize, tui.Theme{}), tui.Dim)
+	case "/copy":
+		answer := ui.lastAssistant()
+		if answer == "" {
+			ui.addInfo("No assistant answer to copy yet.", tui.Dim)
+			return
+		}
+		fmt.Printf("\033]52;c;%s\a", base64.StdEncoding.EncodeToString([]byte(answer)))
+		ui.addInfo("Copied the last answer to the terminal clipboard.", tui.Green)
+	case "/save":
+		path, err := ui.saveTranscript()
+		if err != nil {
+			ui.addInfo("Could not save the transcript: "+err.Error(), tui.Red)
+			return
+		}
+		ui.addInfo("Saved transcript to "+path, tui.Green)
 	case "/retry":
 		if ui.busy {
 			ui.addInfo("Wait for the current answer, or press Ctrl+C to cancel it.", tui.Yellow)
@@ -427,6 +444,39 @@ func (ui *terminalChat) command(text string) {
 	default:
 		ui.addInfo("Unknown command "+text+". Type /help for the list.", tui.Yellow)
 	}
+}
+
+func (ui *terminalChat) lastAssistant() string {
+	for index := len(ui.transcript) - 1; index >= 0; index-- {
+		if ui.transcript[index].role == "assistant" {
+			return ui.transcript[index].content
+		}
+	}
+	return ""
+}
+
+func (ui *terminalChat) saveTranscript() (string, error) {
+	path := "fastloadai-chat-" + time.Now().Format("20060102-150405") + ".md"
+	return path, os.WriteFile(path, []byte(ui.transcriptMarkdown()), 0o644)
+}
+
+func (ui *terminalChat) transcriptMarkdown() string {
+	var builder strings.Builder
+	builder.WriteString("# FastLoadAI chat\n\n")
+	builder.WriteString("- model: `" + filepath.Base(ui.config.ModelPath) + "`\n")
+	if ui.config.Quantization != "" {
+		builder.WriteString("- quantization: `" + ui.config.Quantization + "`\n")
+	}
+	builder.WriteString("- context: " + fmt.Sprintf("%d tokens", ui.config.ContextSize) + "\n\n")
+	for _, item := range ui.transcript {
+		switch item.role {
+		case "user":
+			builder.WriteString("## You\n\n" + item.content + "\n\n")
+		case "assistant":
+			builder.WriteString("## FastLoadAI\n\n" + item.content + "\n\n")
+		}
+	}
+	return builder.String()
 }
 
 func (ui *terminalChat) appendTranscript(item chatItem) {

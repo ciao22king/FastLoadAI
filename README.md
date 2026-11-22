@@ -1,7 +1,8 @@
 # FastLoadAI
 
-FastLoadAI is a Go command-line tool that downloads Hugging Face GGUF models,
-fits them to the machine, and runs local inference through `llama.cpp`.
+FastLoadAI is a Go command-line tool that downloads Hugging Face GGUF models
+or converts safetensors checkpoints to GGUF, fits them to the machine, and runs
+local inference through `llama.cpp`.
 
 It detects the CPU, RAM, disk and GPU, chooses a quantization that fits, writes
 a runtime plan, and opens a streaming chat through `llama-server`. Everything
@@ -11,6 +12,7 @@ runs locally: no prompt or model data leaves the machine.
 
 - Hardware-aware model and quantization selection.
 - Real file sizes from the Hugging Face API, including sharded GGUF files.
+- Native Go safetensors → GGUF conversion: tokenizer, chat template and weights in one file.
 - Parallel shard downloads with an auto-tuned worker pool (up to 16 workers).
 - Hardware probing, Hugging Face metadata and doctor checks run concurrently.
 - One-command download and chat: `fastloadai run qwen2.5-0.5b`.
@@ -22,12 +24,13 @@ runs locally: no prompt or model data leaves the machine.
 - RoPE scaling/YaRN, SWA checkpoints, CPU affinity for hybrid P/E-core CPUs and startup tuning.
 - Speculative decoding with ngram lookup or a separate draft model.
 - Batch/ubatch, parallel slots, thread-batch, NUMA, GPU split and priority tuning.
-- Full-screen chat UI with streaming, scrollback, input history and a status bar.
+- Full-screen chat UI with streaming, scrollback, input history, a welcome panel and a status bar.
+- `/copy` for the terminal clipboard, `/save` for a Markdown transcript, and `/retry` for regeneration.
 - Streaming chat with history trimming, retry, context usage and session stats.
 - A polished terminal UI with a banner, spinner, colour themes and summaries.
 - CPU and NVIDIA GPU detection, Apple Silicon unified memory support.
 - Container-aware limits from cgroups, so Docker memory and CPU caps are honoured.
-- `scan`, `suggest`, `download`, `plan`, `optimize`, `budget`, `models`, `doctor`, `run` and `quantize`.
+- `scan`, `suggest`, `download`, `convert`, `plan`, `optimize`, `budget`, `models`, `doctor`, `run` and `quantize`.
 - JSON output for scripts on `scan`, `suggest` and `models`.
 
 ## Requirements
@@ -163,6 +166,16 @@ then opens the full-screen chat. Ask a question, or use `/help` inside the chat.
 fastloadai run qwen2.5-0.5b --prompt "Explain GGUF in one sentence." --once
 ```
 
+A Hugging Face repository with safetensors weights works without a GGUF file:
+
+```bash
+fastloadai run Qwen/Qwen2.5-0.5B-Instruct --prompt "The capital of France is" --once
+fastloadai run ./qwen-src --no-tui
+```
+
+`run` downloads the checkpoint, converts it in Go, and starts the same chat.
+The conversion is cached next to the model directory.
+
 The full-screen chat is used when both stdin and stdout are terminals. It has a
 conversation viewport, a multi-line input box, a status bar and streaming
 answers. Use `--no-tui` to force the plain line-based chat, for example in a
@@ -179,6 +192,8 @@ fastloadai download Qwen/Qwen2.5-0.5B-Instruct-GGUF
 fastloadai download Qwen/Qwen2.5-0.5B-Instruct-GGUF --dry-run
 fastloadai download Qwen/Qwen2.5-0.5B-Instruct-GGUF --prefer quality
 fastloadai download Qwen/Qwen2.5-7B-Instruct-GGUF --workers 8
+fastloadai download Qwen/Qwen2.5-0.5B-Instruct
+fastloadai convert ./qwen-src --output ./qwen2.5-0.5b-bf16.gguf
 fastloadai models
 fastloadai models --json
 fastloadai plan ./model.gguf --output config.json
@@ -215,7 +230,9 @@ disk, GPU and the estimated model budget. `--json` returns the raw object.
 this machine. It prints the exact `run` command to copy.
 
 `download` inspects the GGUF files in a Hugging Face repository, downloads the
-best quantization that fits, and writes the runtime config. `--prefer balanced`
+best quantization that fits, and writes the runtime config. If the repository
+has no GGUF files, it downloads the safetensors checkpoint and converts it to a
+self-contained GGUF instead. `--prefer balanced`
 (default) targets a 4-5 bit K-quant, `speed` targets 4 bit, and `quality`
 targets 8 bit. `--file` selects an exact file or shard. `--workers` sets the
 parallel download width; `0` (default) auto-tunes it from the CPU count, with a
@@ -273,6 +290,16 @@ path. If the model is missing, it downloads the best fit first, then starts
 - `--no-tui` uses the plain line-based chat instead of the full-screen UI.
 - `--no-color` disables ANSI colour for logs and CI.
 
+`convert` reads a Hugging Face checkpoint directory (`config.json`,
+`tokenizer.json`, `tokenizer_config.json` and one or more `*.safetensors`
+shards) and writes one GGUF file with the weights, tokenizer, special tokens
+and chat template embedded. `--output` chooses the destination and `--json`
+prints a machine-readable summary. Supported source types are F32, F16 and
+BF16 for Qwen2, Llama and other byte-level BPE models. The conversion
+keeps the source precision; it does not quantize. A tied embedding is written
+once, so the output stays compact. `run` and `download` call the same converter
+automatically and cache the result.
+
 `quantize` runs `llama-quantize` on an existing GGUF file.
 
 ## Chat keys
@@ -297,6 +324,8 @@ path. If the model is missing, it downloads the best fit first, then starts
 | `/stats` | Show turns, tokens, speed and elapsed time |
 | `/context` | Show context-window usage with a bar |
 | `/retry` | Regenerate the last answer |
+| `/copy` | Copy the last answer to the terminal clipboard (OSC 52) |
+| `/save` | Save the conversation as a Markdown file |
 | `/clear` | Reset the conversation and session stats |
 | `/exit`, `/quit` | Close the chat and stop the server |
 
@@ -479,8 +508,9 @@ docker compose run --rm fastloadai run qwen2.5-0.5b
 ## Compatibility
 
 FastLoadAI generates separate runtime configs and never modifies model files.
-`quantize` wraps `llama-quantize`; converting Hugging Face checkpoints to GGUF
-is not automated. MoE models work when the installed `llama.cpp` build supports
+`convert` performs a native Go safetensors → GGUF conversion, and `run` and
+`download` use it automatically when no GGUF is present. `quantize` wraps
+`llama-quantize` for further compression. MoE models work when the installed `llama.cpp` build supports
 the architecture; FastLoadAI adds the MoE placement flags but cannot add kernel
 support that the build does not have. Optimization flags are forwarded to
 `llama-server`, so an older build may reject a newer flag. Check
@@ -507,11 +537,19 @@ the official `llama.cpp` b12613 build:
 | Qwen2.5-0.5B-Instruct, RoPE/SWA | Q4_K_M | 8192 | `--rope-scaling yarn --rope-scale 2`, SWA checkpoints 8/2048 |
 | Qwen2.5-0.5B-Instruct, startup flags | Q4_K_M | 8192 | `--no-repack`, `--no-warmup`, `--cpu-range 0-3` |
 | Qwen2.5-0.5B-Instruct, `run --auto --prompt hello` | Q4_K_M | 2048 | light effort, q4_0 KV, real reply |
+| Qwen2.5-0.5B-Instruct safetensors → GGUF | BF16 | 2048 | 290 tensors, 494M params, real reply |
 | Sparse 30B GGUF header, 18 GB file | Q4_K_M | 4096 | streaming plan on a 9 GB budget, no OOM |
 
 The adaptive parser was checked against the real Qwen2.5-0.5B GGUF header
 (630M parameters, 24 layers, 14 heads, 2 KV heads) and against a sparse 30B
 GGUF header to exercise the streaming path without downloading 18 GB.
+
+The safetensors converter was checked against the official `llama.cpp`
+`convert_hf_to_gguf.py` output for the same Qwen2.5-0.5B-Instruct checkpoint:
+all 290 shared tensors matched byte for byte. The native file loaded in
+`llama-server` and answered prompts; a synthetic Qwen2 checkpoint covers the
+converter, tokenizer, BF16 norm conversion, tied embeddings, shard loading and
+cache path in unit tests.
 
 Speeds are short-generation estimates and vary with prompt length, threads and
 CPU. The optimization runs above were verified with the real Qwen2.5-0.5B GGUF
@@ -536,6 +574,7 @@ internal/chat/      streaming chat loop and history trimming
 internal/config/    config file read and write
 internal/hardware/  CPU, RAM, disk, GPU and cgroup detection
 internal/hf/        Hugging Face API, GGUF selection and downloads
+internal/safetensors/  safetensors reader and native GGUF writer
 internal/llama/     llama-server command, process and readiness
 internal/model/     shared data types
 internal/optimization/  profiles, MoE detection and llama.cpp flag selection

@@ -52,10 +52,7 @@ func (ui *terminalChat) headerLines() []string {
 		{" FastLoadAI ", []string{tui.Bold, tui.Cyan}},
 		{"· " + filepath.Base(ui.config.ModelPath), []string{tui.Dim}},
 	}, ui.width)
-	quant := ui.config.Quantization
-	if quant == "" {
-		quant = "GGUF"
-	}
+	quant := displayQuant(ui.config.ModelPath, ui.config.Quantization)
 	device := "CPU"
 	if ui.config.NGPULayers > 0 {
 		device = fmt.Sprintf("GPU %d", ui.config.NGPULayers)
@@ -89,6 +86,14 @@ func (ui *terminalChat) headerLines() []string {
 	return []string{title, ui.renderSegments([]segment{{detail, []string{tui.Dim}}}, ui.width)}
 }
 
+func displayQuant(modelPath, quant string) string {
+	base := strings.TrimSuffix(filepath.Base(modelPath), filepath.Ext(modelPath))
+	if quant == "" || quant == base {
+		return "GGUF"
+	}
+	return quant
+}
+
 func fitHeaderDetails(parts []string, width int) string {
 	for len(parts) > 0 {
 		text := strings.Join(parts, " · ")
@@ -115,9 +120,15 @@ func (ui *terminalChat) statusLine() string {
 			left += fmt.Sprintf(" · %.0f tok/s", float64(tui.EstimateTokens(ui.streaming))/elapsed)
 		}
 	}
-	right := " Enter send · Ctrl+J newline · /help · Ctrl+C exit "
-	if ui.width < 100 {
-		right = " Enter send · Ctrl+J · /help · Ctrl+C "
+	if ui.scroll > 0 {
+		left += fmt.Sprintf(" · ↑%d", ui.scroll)
+	}
+	right := " Enter send · Ctrl+J newline · /help · /copy "
+	if ui.width < 110 {
+		right = " Enter send · Ctrl+J · /help · /copy "
+	}
+	if ui.width < 90 {
+		right = " Enter send · /help · /copy "
 	}
 	if ui.width < 70 {
 		right = " Enter send · Ctrl+C "
@@ -200,13 +211,47 @@ func (ui *terminalChat) conversationLines() []string {
 		ui.renderedVersion = ui.transcriptVersion
 	}
 	if len(ui.transcript) == 0 && !ui.busy {
-		return []string{ui.theme.Paint("  Ask anything. Type /help for commands.", tui.Dim)}
+		return ui.welcomeLines()
 	}
 	out := ui.rendered
 	if ui.busy {
 		out = append(append([]string(nil), out...), ui.renderAssistant(ui.streaming, true)...)
 		out = append(out, "")
 	}
+	return out
+}
+
+func (ui *terminalChat) welcomeLines() []string {
+	width := ui.width
+	if width > 88 {
+		width = 88
+	}
+	inner := max(12, width-6)
+	device := "CPU"
+	if ui.config.NGPULayers > 0 {
+		device = fmt.Sprintf("GPU %d", ui.config.NGPULayers)
+	}
+	model := fmt.Sprintf("%s · %s · ctx %d · %s", filepath.Base(ui.config.ModelPath), displayQuant(ui.config.ModelPath, ui.config.Quantization), ui.config.ContextSize, device)
+	rows := [][2]string{
+		{"FastLoadAI is ready", ""},
+		{"model", model},
+		{"ask", "Type a question. Paste text with Ctrl+Shift+V."},
+		{"help", "/help commands · Tab completes · ↑/↓ history"},
+		{"save", "/save writes Markdown · /copy copies the answer"},
+	}
+	out := []string{"  " + ui.theme.Paint("╭"+strings.Repeat("─", max(2, width-4))+"╮", tui.Grey)}
+	for index, row := range rows {
+		style := []string{tui.Dim}
+		if index == 0 {
+			style = []string{tui.Bold, tui.Cyan}
+		}
+		content := row[0]
+		if row[1] != "" {
+			content = fmt.Sprintf("%-7s %s", row[0], row[1])
+		}
+		out = append(out, "  "+ui.theme.Paint("│", tui.Grey)+" "+ui.renderSegments([]segment{{content, style}}, inner)+" "+ui.theme.Paint("│", tui.Grey))
+	}
+	out = append(out, "  "+ui.theme.Paint("╰"+strings.Repeat("─", max(2, width-4))+"╯", tui.Grey))
 	return out
 }
 
@@ -267,9 +312,19 @@ func (ui *terminalChat) renderAssistant(content string, streaming bool) []string
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "```") {
 			inCode = !inCode
+			if inCode {
+				line = "── code ──"
+			} else {
+				line = "──────────"
+			}
 			style = []string{tui.Grey}
 		} else if inCode {
 			style = []string{tui.Grey}
+		} else if strings.HasPrefix(trimmed, "#") {
+			line = strings.TrimSpace(strings.TrimLeft(trimmed, "#"))
+			style = []string{tui.Bold, tui.Cyan}
+		} else if strings.HasPrefix(trimmed, "- ") || strings.HasPrefix(trimmed, "* ") {
+			line = "• " + strings.TrimSpace(trimmed[2:])
 		}
 		prefix := indent
 		prefixStyles := []string(nil)
