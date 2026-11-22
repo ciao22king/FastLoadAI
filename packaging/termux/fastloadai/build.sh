@@ -11,16 +11,16 @@ TERMUX_PKG_BUILD_IN_SRC=true
 TERMUX_PKG_AUTO_UPDATE=true
 
 termux_step_make() {
-    termux_setup_golang
+	termux_setup_golang
 
-    cd "$TERMUX_PKG_SRCDIR"
-    go build -trimpath -buildvcs=false \
-        -ldflags "-s -w -X github.com/ciao22king/FastLoadAI/internal/tui.Version=${TERMUX_PKG_VERSION}" \
-        -o fastloadai ./cmd/fastloadai
+	cd "$TERMUX_PKG_SRCDIR"
+	go build -trimpath -buildvcs=false \
+		-ldflags "-s -w -X github.com/ciao22king/FastLoadAI/internal/tui.Version=${TERMUX_PKG_VERSION}" \
+		-o fastloadai ./cmd/fastloadai
 }
 
 termux_step_make_install() {
-    install -Dm755 fastloadai "$TERMUX_PREFIX/bin/fastloadai"
-    install -Dm644 LICENSE "$TERMUX_PREFIX/share/licenses/fastloadai/LICENSE"
-    install -Dm644 README.md "$TERMUX_PREFIX/share/doc/fastloadai/README.md"
+	install -Dm755 fastloadai "$TERMUX_PREFIX/bin/fastloadai"
+	install -Dm644 LICENSE "$TERMUX_PREFIX/share/licenses/fastloadai/LICENSE"
+	install -Dm644 README.md "$TERMUX_PREFIX/share/doc/fastloadai/README.md"
 }
