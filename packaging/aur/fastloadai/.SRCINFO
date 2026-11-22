@@ -1,0 +1,14 @@
+pkgbase = fastloadai
+pkgdesc = Hardware-aware local GGUF model runner and chat UI for llama.cpp
+pkgver = 1.1.0
+pkgrel = 1
+url = https://github.com/ciao22king/FastLoadAI
+arch = x86_64
+arch = aarch64
+license = Apache-2.0
+makedepends = go
+optdepends = llama.cpp-git: llama-server and llama-quantize runtime (AUR)
+source = fastloadai-1.1.0.tar.gz::https://github.com/ciao22king/FastLoadAI/archive/refs/tags/v1.1.0.tar.gz
+sha256sums = SKIP
+
+pkgname = fastloadai

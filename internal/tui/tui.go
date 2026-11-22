@@ -15,8 +15,9 @@ import (
 	"github.com/ciao22king/FastLoadAI/internal/optimization"
 )
 
-// Version is shown in the banner and by --version.
-const Version = "1.1.0"
+// Version is shown in the banner and by --version. It can be overridden at
+// build time with -ldflags "-X .../internal/tui.Version=...".
+var Version = "1.1.0"
 
 const (
 	Reset   = "\033[0m"

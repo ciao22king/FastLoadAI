@@ -1,0 +1,33 @@
+# Maintainer: FastLoadAI maintainers <maintainers@fastloadai.invalid>
+pkgname=fastloadai
+pkgver=1.1.0
+pkgrel=1
+pkgdesc='Hardware-aware local GGUF model runner and chat UI for llama.cpp'
+arch=('x86_64' 'aarch64')
+url='https://github.com/ciao22king/FastLoadAI'
+license=('Apache-2.0')
+makedepends=('go')
+optdepends=('llama.cpp-git: llama-server and llama-quantize runtime (AUR)')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  cd "FastLoadAI-$pkgver"
+  export CGO_ENABLED=0
+  go build -trimpath -buildvcs=false \
+    -ldflags "-s -w -X github.com/ciao22king/FastLoadAI/internal/tui.Version=$pkgver" \
+    -o "$pkgname" ./cmd/fastloadai
+}
+
+check() {
+  cd "FastLoadAI-$pkgver"
+  export CGO_ENABLED=0
+  go test ./...
+}
+
+package() {
+  cd "FastLoadAI-$pkgver"
+  install -Dm755 "$pkgname" "$pkgdir/usr/bin/$pkgname"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+}

@@ -57,6 +57,26 @@ go build -o fastloadai ./cmd/fastloadai
 ./fastloadai --help
 ```
 
+### Arch Linux (AUR)
+
+The AUR package is `fastloadai`. Install it with an AUR helper:
+
+```bash
+yay -S fastloadai
+```
+
+Or build it directly:
+
+```bash
+git clone https://aur.archlinux.org/fastloadai.git
+cd fastloadai
+makepkg -si
+```
+
+The package installs the Go binary. `llama-server` and `llama-quantize` are
+runtime dependencies from `llama.cpp-git` (AUR) or another llama.cpp build on
+`PATH`. The packaging source lives in `packaging/aur/fastloadai`.
+
 ## Quick start
 
 ```bash
