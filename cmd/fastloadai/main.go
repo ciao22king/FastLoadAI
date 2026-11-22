@@ -40,6 +40,8 @@ func run(args []string) int {
 		return commandPlan(args[1:])
 	case "optimize":
 		return commandOptimize(args[1:])
+	case "budget":
+		return commandBudget(args[1:])
 	case "download":
 		return commandDownload(args[1:])
 	case "suggest":
@@ -70,6 +72,7 @@ Commands:
   download   Download a GGUF quantization from Hugging Face.
   plan       Build a runtime plan and write the config file.
   optimize   Detect MoE/GPU/memory and write the best llama.cpp flags.
+  budget     Show how many parameters fit and how much stays in RAM/VRAM.
   run        Download if needed, then open the full-screen chat.
   models     List downloaded GGUF models.
   doctor     Check the runtime, model files and configuration.
@@ -80,8 +83,10 @@ Examples:
   fastloadai suggest
   fastloadai run qwen2.5-0.5b
   fastloadai run Qwen/Qwen2.5-0.5B-Instruct-GGUF --prompt "Hello"
+  fastloadai run --auto --prompt "Hello"
   fastloadai run qwen2.5-0.5b --no-tui
   fastloadai optimize qwen2.5-0.5b --profile speed
+  fastloadai budget qwen2.5-0.5b --prompt "Explain step by step how TCP works"
   fastloadai download Qwen/Qwen2.5-0.5B-Instruct-GGUF --dry-run
   fastloadai download Qwen/Qwen2.5-7B-Instruct-GGUF --workers 8
   fastloadai models --json

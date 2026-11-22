@@ -95,4 +95,18 @@ type Config struct {
 	NoWarmup            bool    `json:"no_warmup,omitempty"`
 	Priority            int     `json:"priority,omitempty"`
 	Poll                int     `json:"poll,omitempty"`
+
+	// Adaptive parameter budgeting. The planner reads GGUF metadata, measures
+	// free RAM/VRAM and chooses a residency plan that should not exhaust memory.
+	Adaptive           bool   `json:"adaptive,omitempty"`
+	Effort             string `json:"effort,omitempty"`
+	ModelParameters    int64  `json:"model_parameters,omitempty"`
+	ModelLayers        int    `json:"model_layers,omitempty"`
+	ParameterBudget    int64  `json:"parameter_budget,omitempty"`
+	ActiveParameters   int64  `json:"active_parameters,omitempty"`
+	ResidentParameters int64  `json:"resident_parameters,omitempty"`
+	KVBytesPerToken    int64  `json:"kv_bytes_per_token,omitempty"`
+	Streaming          bool   `json:"streaming,omitempty"`
+	AdaptiveRisk       string `json:"adaptive_risk,omitempty"`
+	AdaptiveReason     string `json:"adaptive_reason,omitempty"`
 }

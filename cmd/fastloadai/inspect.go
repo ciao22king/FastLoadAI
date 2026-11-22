@@ -29,12 +29,13 @@ func commandScan(args []string) int {
 
 func commandPlan(args []string) int {
 	positional, flags := splitArgs(args, withOptimizationValueFlags(map[string]bool{
-		"--output": true,
+		"--output": true, "--prompt": true,
 	}))
 	set := flag.NewFlagSet("plan", flag.ContinueOnError)
 	output := set.String("output", defaultConfig, "config file to write")
 	lowMemory := set.Bool("low-memory", false, "force a smaller context and small batches")
 	noColor := set.Bool("no-color", false, "disable color")
+	prompt := set.String("prompt", "", "prompt hint used to choose the effort tier")
 	optimize := registerOptimizationFlags(set)
 	if !parseFlags(set, flags) {
 		return 2
@@ -54,7 +55,9 @@ func commandPlan(args []string) int {
 		cfg.LowMemory = true
 		cfg.ContextSize = min(cfg.ContextSize, 1024)
 	}
-	cfg = optimization.Apply(cfg, modelPath, "", optimize.options())
+	opts := optimize.options()
+	opts.Prompt = *prompt
+	cfg = optimization.Apply(cfg, modelPath, "", opts)
 	if err := saveConfig(*output, cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "Could not write %s: %v\n", *output, err)
 		return 1

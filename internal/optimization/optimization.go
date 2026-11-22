@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/ciao22king/FastLoadAI/internal/adaptive"
 	"github.com/ciao22king/FastLoadAI/internal/model"
 )
 
@@ -94,6 +95,9 @@ type Options struct {
 	NoWarmup          *bool
 	Priority          int
 	Poll              int
+	Adaptive          bool
+	Effort            string
+	Prompt            string
 }
 
 // Apply fills a runtime config with the best-known llama.cpp optimizations.
@@ -119,6 +123,7 @@ func Apply(cfg model.Config, modelPath, repo string, opts Options) model.Config 
 	applyCPUAffinity(&cfg, profile)
 	applyMoE(&cfg, profile)
 	applySpeculative(&cfg, opts)
+	applyAdaptive(&cfg, opts)
 	applyOverrides(&cfg, opts)
 	if !cfg.MoE || cfg.Hardware.GPUName == "" {
 		// llama.cpp's MoE cache needs a MoE model and a GPU backend.
@@ -128,6 +133,17 @@ func Apply(cfg model.Config, modelPath, repo string, opts Options) model.Config 
 	cfg.Mmap = usesMmap(cfg.LoadMode)
 	cfg.LlamaCPPMoe = moeDescription(cfg)
 	return cfg
+}
+
+func applyAdaptive(cfg *model.Config, opts Options) {
+	if !opts.Adaptive || cfg.ModelPath == "" {
+		return
+	}
+	effort, err := adaptive.ParseEffort(opts.Effort)
+	if err != nil {
+		effort = adaptive.EffortAuto
+	}
+	*cfg = adaptive.Apply(*cfg, cfg.ModelPath, opts.Prompt, effort)
 }
 
 func automaticProfile(cfg model.Config) Profile {
@@ -661,6 +677,13 @@ func SummaryRows(cfg model.Config) [][2]string {
 		{"Thread tuning", threadTuning},
 		{"Load mode", fallback(cfg.LoadMode, "mmap")},
 	}
+	if cfg.Adaptive {
+		rows = append(rows,
+			[2]string{"Effort", fallback(cfg.Effort, "auto")},
+			[2]string{"Parameters", fmt.Sprintf("%s total · %s active · %s budget", formatCount(cfg.ModelParameters), formatCount(cfg.ActiveParameters), formatCount(cfg.ParameterBudget))},
+			[2]string{"Residency", fmt.Sprintf("%s resident · %s streamed · %s", formatCount(cfg.ResidentParameters), formatCount(maxInt64(0, cfg.ModelParameters-cfg.ResidentParameters)), fallback(cfg.AdaptiveRisk, "unknown"))},
+		)
+	}
 	if cfg.KVUnified != nil {
 		value := "per-slot"
 		if *cfg.KVUnified {
@@ -817,6 +840,36 @@ func clamp(value, low, high int) int {
 }
 
 func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+// Adaptive recomputes the parameter plan for a config that was inherited from
+// disk, where the saved sizing may be stale or may not fit the current prompt.
+func Adaptive(cfg model.Config, prompt, effort string) model.Config {
+	parsed, err := adaptive.ParseEffort(effort)
+	if err != nil {
+		parsed = adaptive.EffortAuto
+	}
+	return adaptive.Apply(cfg, cfg.ModelPath, prompt, parsed)
+}
+
+func formatCount(value int64) string {
+	switch {
+	case value >= 1_000_000_000:
+		return fmt.Sprintf("%.1fB", float64(value)/1e9)
+	case value >= 1_000_000:
+		return fmt.Sprintf("%.0fM", float64(value)/1e6)
+	case value > 0:
+		return fmt.Sprintf("%d", value)
+	default:
+		return "0"
+	}
+}
+
+func maxInt64(a, b int64) int64 {
 	if a > b {
 		return a
 	}

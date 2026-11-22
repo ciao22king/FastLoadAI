@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/ciao22king/FastLoadAI/internal/adaptive"
 	"github.com/ciao22king/FastLoadAI/internal/optimization"
 )
 
@@ -66,6 +67,8 @@ type optimizationFlags struct {
 	warmup            *bool
 	priority          *int
 	poll              *int
+	adaptive          *bool
+	effort            *string
 }
 
 func registerOptimizationFlags(set *flag.FlagSet) *optimizationFlags {
@@ -125,6 +128,8 @@ func registerOptimizationFlags(set *flag.FlagSet) *optimizationFlags {
 		warmup:            set.Bool("warmup", false, "force the llama-server warmup run"),
 		priority:          set.Int("priority", -999, "process priority: -1 low, 0 normal, 1 medium, 2 high, 3 realtime"),
 		poll:              set.Int("poll", -1, "polling level 0..100"),
+		adaptive:          set.Bool("adaptive", true, "fit parameters automatically to free RAM/VRAM"),
+		effort:            set.String("effort", "auto", "prompt effort: auto, light, standard or deep"),
 	}
 }
 
@@ -167,6 +172,8 @@ func (f *optimizationFlags) options() optimization.Options {
 		CPURange:          *f.cpuRange,
 		Priority:          -999,
 		Poll:              -1,
+		Adaptive:          *f.adaptive,
+		Effort:            *f.effort,
 		NCPUMoE:           -1,
 		MoECacheMiB:       -1,
 		MoECacheCPUShare:  -1,
@@ -288,7 +295,7 @@ func optimizationValueFlags() map[string]bool {
 		"--draft-gpu-layers": true, "--cache-reuse": true, "--priority": true, "--poll": true,
 		"--swa-checkpoints": true, "--checkpoint-min-step": true,
 		"--rope-scaling": true, "--rope-scale": true, "--yarn-orig-ctx": true,
-		"--cpu-mask": true, "--cpu-range": true,
+		"--cpu-mask": true, "--cpu-range": true, "--effort": true,
 	}
 }
 
@@ -322,7 +329,8 @@ func isOptimizationFlag(name string) bool {
 		"draft-p-min", "draft-gpu-layers", "cache-reuse", "context-shift",
 		"no-context-shift", "swa-full", "swa-checkpoints", "checkpoint-min-step",
 		"rope-scaling", "rope-scale", "yarn-orig-ctx", "cpu-mask", "cpu-range",
-		"no-repack", "repack", "no-warmup", "warmup", "priority", "poll":
+		"no-repack", "repack", "no-warmup", "warmup", "priority", "poll",
+		"adaptive", "effort":
 		return true
 	}
 	return false
@@ -330,6 +338,9 @@ func isOptimizationFlag(name string) bool {
 
 func (f *optimizationFlags) validate() error {
 	if _, err := optimization.ParseProfile(*f.profile); err != nil {
+		return err
+	}
+	if _, err := adaptive.ParseEffort(*f.effort); err != nil {
 		return err
 	}
 	if err := oneOf("flash-attn", *f.flashAttention, "auto", "on", "off"); err != nil {

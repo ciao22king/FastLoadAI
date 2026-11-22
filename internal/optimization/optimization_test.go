@@ -443,6 +443,35 @@ func TestSummaryRowsIncludeNewControls(t *testing.T) {
 	}
 }
 
+func TestSummaryRowsShowsAdaptiveBudget(t *testing.T) {
+	cfg := model.Config{
+		Adaptive: true, Effort: "deep",
+		ModelParameters: 30_000_000_000, ActiveParameters: 30_000_000_000,
+		ParameterBudget: 13_600_000_000, ResidentParameters: 13_600_000_000,
+		AdaptiveRisk: "streaming",
+	}
+	rows := SummaryRows(cfg)
+	wanted := map[string]string{
+		"Effort":     "deep",
+		"Parameters": "30.0B total · 30.0B active · 13.6B budget",
+		"Residency":  "13.6B resident · 16.4B streamed · streaming",
+	}
+	found := map[string]bool{}
+	for _, row := range rows {
+		if want, ok := wanted[row[0]]; ok {
+			found[row[0]] = true
+			if row[1] != want {
+				t.Fatalf("%s = %q, want %q", row[0], row[1], want)
+			}
+		}
+	}
+	for key := range wanted {
+		if !found[key] {
+			t.Fatalf("summary missing %q: %#v", key, rows)
+		}
+	}
+}
+
 func boolPointer(value bool) *bool {
 	return &value
 }

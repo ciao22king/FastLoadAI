@@ -13,13 +13,14 @@ import (
 
 func commandOptimize(args []string) int {
 	positional, flags := splitArgs(args, withOptimizationValueFlags(map[string]bool{
-		"--config": true, "--models-dir": true,
+		"--config": true, "--models-dir": true, "--prompt": true,
 	}))
 	set := flag.NewFlagSet("optimize", flag.ContinueOnError)
 	configPath := set.String("config", defaultConfig, "config file to update")
 	modelsDir := set.String("models-dir", "models", "directory containing GGUF files")
 	asJSON := set.Bool("json", false, "print the optimized config as JSON")
 	noColor := set.Bool("no-color", false, "disable color")
+	prompt := set.String("prompt", "", "prompt hint used to choose the effort tier")
 	optimize := registerOptimizationFlags(set)
 	if !parseFlags(set, flags) {
 		return 2
@@ -73,10 +74,15 @@ func commandOptimize(args []string) int {
 		base.Quantization = hf.QuantLabel(modelPath)
 	}
 	base.ModelSizeBytes = sizeBytes
+	opts := optimize.options()
+	opts.Prompt = *prompt
 	if cfg.OptimizationProfile != "" && !optimize.touched() && sameModel {
 		cfg = optimization.Inherit(base, cfg)
+		if opts.Adaptive {
+			cfg = optimization.Adaptive(cfg, opts.Prompt, opts.Effort)
+		}
 	} else {
-		cfg = optimization.Apply(base, modelPath, base.ModelRepo, optimize.options())
+		cfg = optimization.Apply(base, modelPath, base.ModelRepo, opts)
 	}
 	if err := saveConfig(*configPath, cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "Could not write %s: %v\n", *configPath, err)

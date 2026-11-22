@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 
+	"github.com/ciao22king/FastLoadAI/internal/adaptive"
 	"github.com/ciao22king/FastLoadAI/internal/catalog"
 	"github.com/ciao22king/FastLoadAI/internal/chat"
 	"github.com/ciao22king/FastLoadAI/internal/hardware"
@@ -40,6 +41,7 @@ func commandRun(args []string) int {
 	maxTokens := set.Int("max-tokens", 0, "maximum tokens per answer")
 	system := set.String("system", "", "replace the system prompt")
 	lowMemory := set.Bool("low-memory", false, "force a smaller context and small batches")
+	autoModel := set.Bool("auto", false, "pick a model that matches the prompt effort and memory budget")
 	noColor := set.Bool("no-color", false, "disable color")
 	noTUI := set.Bool("no-tui", false, "use the plain line-based chat instead of the full-screen UI")
 	optimize := registerOptimizationFlags(set)
@@ -63,9 +65,16 @@ func commandRun(args []string) int {
 		cfg = model.Config{}
 	}
 	specs := hardware.Detect()
+	autoRepo := ""
+	if requested == "" && *autoModel {
+		requested, autoRepo = chooseAutomaticModel(specs, *modelsDir, *prompt, *optimize.effort)
+		if requested != "" {
+			fmt.Fprintf(os.Stderr, "Auto model: %s\n", requested)
+		}
+	}
 	modelPath, resolveErr := resolveModel(requested, cfg, *modelsDir)
 	if resolveErr != nil || modelPath == "" {
-		repo := ""
+		repo := autoRepo
 		if requested != "" {
 			if isRepoReference(requested) {
 				repo = requested
@@ -154,10 +163,15 @@ func commandRun(args []string) int {
 	if *gpuLayers >= 0 {
 		base.NGPULayers = *gpuLayers
 	}
+	opts := optimize.options()
+	opts.Prompt = *prompt
 	if saved.OptimizationProfile != "" && !optimize.touched() && !*lowMemory && sameModel {
 		cfg = optimization.Inherit(base, saved)
+		if opts.Adaptive {
+			cfg = optimization.Adaptive(cfg, opts.Prompt, opts.Effort)
+		}
 	} else {
-		cfg = optimization.Apply(base, modelPath, base.ModelRepo, optimize.options())
+		cfg = optimization.Apply(base, modelPath, base.ModelRepo, opts)
 	}
 	if *threads > 0 {
 		cfg.CPUThreads = *threads
@@ -179,6 +193,9 @@ func commandRun(args []string) int {
 		return 1
 	}
 	theme := themeFor(*noColor)
+	if cfg.Adaptive {
+		fmt.Fprintln(os.Stderr, theme.Paint("Adaptive: "+cfg.AdaptiveReason, tui.Dim))
+	}
 	if cfg.ModelFit == "too_large" {
 		fmt.Fprintln(os.Stderr, theme.Paint("Warning: this model is larger than the estimated memory. Expect slow loading and possible failures; try a smaller quantization.", tui.Yellow))
 	} else if cfg.ModelFit == "tight" {
@@ -190,4 +207,34 @@ func commandRun(args []string) int {
 		Color: !*noColor, ColorSet: *noColor,
 	}
 	return chat.RunChat(modelPath, cfg, options)
+}
+
+// chooseAutomaticModel routes a prompt to a local model first, then to a
+// catalog model. Light prompts are capped to a small model; deep prompts may
+// use the whole memory budget.
+func chooseAutomaticModel(specs model.Specs, modelsDir, prompt, effortText string) (string, string) {
+	budget := hardware.UsableModelMemoryGB(specs)
+	parsed, err := adaptive.ParseEffort(effortText)
+	if err != nil {
+		parsed = adaptive.EffortAuto
+	}
+	effort := adaptive.ResolveEffort(parsed, prompt)
+	groups, _ := localGGUFGroups(modelsDir)
+	local := make([]adaptive.Candidate, 0, len(groups))
+	for _, group := range groups {
+		local = append(local, adaptive.Candidate{
+			Name: group.Name, Path: group.Path, SizeGB: float64(group.SizeBytes) / (1024 * 1024 * 1024), Local: true,
+		})
+	}
+	if selected, ok := adaptive.SelectModel(local, budget, effort); ok {
+		return selected.Path, ""
+	}
+	remote := make([]adaptive.Candidate, 0, len(catalog.Catalog))
+	for _, item := range catalog.Catalog {
+		remote = append(remote, adaptive.Candidate{Name: item.Name, Repo: item.Repo, SizeGB: item.SizeGB})
+	}
+	if selected, ok := adaptive.SelectModel(remote, budget, effort); ok {
+		return selected.Repo, selected.Repo
+	}
+	return "", ""
 }

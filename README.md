@@ -15,6 +15,8 @@ runs locally: no prompt or model data leaves the machine.
 - Hardware probing, Hugging Face metadata and doctor checks run concurrently.
 - One-command download and chat: `fastloadai run qwen2.5-0.5b`.
 - Automatic optimization profiles: `auto`, `speed`, `balanced`, `memory` and `quality`.
+- Adaptive parameter budgeting: reads GGUF metadata and free RAM/VRAM, then keeps a large model inside the machine with mmap streaming instead of crashing.
+- Prompt-aware effort tiers (`auto`, `light`, `standard`, `deep`) that scale context, KV cache, batches and model routing.
 - MoE-aware CPU expert offload, GPU expert cache and tensor placement overrides.
 - Flash Attention, split K/V cache quantization, unified KV, prompt-cache RAM limits and slot persistence.
 - RoPE scaling/YaRN, SWA checkpoints, CPU affinity for hybrid P/E-core CPUs and startup tuning.
@@ -25,7 +27,7 @@ runs locally: no prompt or model data leaves the machine.
 - A polished terminal UI with a banner, spinner, colour themes and summaries.
 - CPU and NVIDIA GPU detection, Apple Silicon unified memory support.
 - Container-aware limits from cgroups, so Docker memory and CPU caps are honoured.
-- `scan`, `suggest`, `download`, `plan`, `optimize`, `models`, `doctor`, `run` and `quantize`.
+- `scan`, `suggest`, `download`, `plan`, `optimize`, `budget`, `models`, `doctor`, `run` and `quantize`.
 - JSON output for scripts on `scan`, `suggest` and `models`.
 
 ## Requirements
@@ -181,6 +183,8 @@ fastloadai models
 fastloadai models --json
 fastloadai plan ./model.gguf --output config.json
 fastloadai optimize qwen2.5-0.5b --profile speed
+fastloadai optimize ./model.gguf --prompt "Explain step by step how TCP works"
+fastloadai budget ./model.gguf --prompt "hello"
 fastloadai optimize ./model.gguf --profile memory --kv-cache q4_0
 fastloadai optimize ./model.gguf --kv-cache-k q8_0 --kv-cache-v f16 --cache-ram 2048
 fastloadai optimize ./model.gguf --rope-scaling yarn --rope-scale 2 --yarn-orig-ctx 32768
@@ -191,7 +195,8 @@ fastloadai run
 fastloadai run qwen2.5-0.5b
 fastloadai run qwen2.5-0.5b --no-tui
 fastloadai run Qwen/Qwen2.5-0.5B-Instruct-GGUF
-fastloadai run --prompt "Introduce yourself." --once
+fastloadai run --auto --prompt "Introduce yourself." --once
+fastloadai run --prompt "Explain step by step how TCP works" --once
 fastloadai run --low-memory --ctx-size 1024
 fastloadai run --ctx-size 8192 --threads 6 --temperature 0.4
 fastloadai run qwen2.5-0.5b --profile speed --flash-attn on --kv-cache q8_0
@@ -230,6 +235,12 @@ and writes the best `llama.cpp` flags for the chosen profile. It is the explicit
 way to inspect or change the runtime plan without starting a server. Use
 `--json` to print the resulting config.
 
+`budget` is a read-only view of the adaptive planner. It reads the real GGUF
+header, measures free RAM/VRAM, and prints how many parameters fit, how many
+stay resident, how many stream from mmap, the chosen GPU layers, KV type,
+context, batch size and a residency bar. It never starts a server or downloads
+a model. Use `--json` for scripts and `--prompt` to see the effort tier.
+
 `doctor` checks Go, RAM, disk, GPU, `llama-server`, `llama-quantize`, network
 access to Hugging Face, the config file, the model path and the model fit. It
 exits non-zero when a required piece is missing.
@@ -238,6 +249,12 @@ exits non-zero when a required piece is missing.
 path. If the model is missing, it downloads the best fit first, then starts
 `llama-server` on `127.0.0.1` and opens the chat. Useful options:
 
+- `--auto` picks a local model first, then a catalog model, using the prompt
+  effort and the memory budget. Light prompts stay on small models; deep
+  prompts may use the largest model that fits.
+- `--effort auto|light|standard|deep` overrides the prompt classifier.
+- `--adaptive=false` disables automatic parameter budgeting and keeps the
+  profile values exactly as written.
 - `--prefer speed|balanced|quality` controls automatic downloads.
 - `--prompt` sends a first message; `--once` answers it and exits.
 - `--threads`, `--ctx-size`, `--gpu-layers` override the plan.
@@ -305,6 +322,45 @@ depending on free memory and doubles when the model leaves at least 4 GB of
 headroom, capped at 8K. `mmap` lets `llama.cpp` map weights and load pages on
 demand. The estimate is conservative, not a guarantee against running out of
 memory.
+
+## Adaptive parameter budget
+
+The adaptive layer answers one question before `llama-server` starts: how much
+of this model can this machine hold right now, and how much should stay on
+disk? It reads the GGUF header directly (tensor shapes, block count, attention
+heads, KV heads, expert count and context length), so the answer is based on
+the real file, not on its name.
+
+The planner splits the machine into a RAM pool and a VRAM pool, reserves room
+for the operating system, the KV cache and runtime buffers, and then chooses:
+
+- the number of parameters that fit at the current quantization;
+- the active parameter count for MoE models, using the expert ratio;
+- how many layers go to the GPU and how many experts stay on the CPU;
+- a safe context size, batch size and KV cache type for the effort tier;
+- mmap streaming when the model is larger than the budget.
+
+Streaming mode is the safety valve. Instead of forcing all weights into
+anonymous memory and letting the OOM killer stop the process, FastLoadAI leaves
+the weights in the mmap page cache and lets the kernel evict pages. The model
+starts, answers more slowly, and the planner reports the trade-off:
+
+```bash
+fastloadai budget ./Qwen2.5-32B-Instruct-Q4_K_M.gguf
+```
+
+```text
+  Residency [████████████░░░░░░░░░░░░░░░░]  STREAMING
+Why:
+  standard effort: 18.0 GB model does not fit in 9.0 GB RAM+VRAM; mmap streaming
+  keeps 13.5B of 30.0B params resident, ctx 4096, 0/80 GPU layers.
+```
+
+Effort tiers are deliberately cheap to compute: prompt length, code fences,
+question count and a small list of reasoning markers. No tokenizer or model
+call is needed. `light` uses a 2K context, `q4_0` KV and small batches;
+`standard` uses 4K and `q8_0`; `deep` uses 8K. An explicit `--ctx-size`,
+`--gpu-layers`, `--batch-size` or KV flag always wins over the adaptive value.
 
 GPU offload is enabled for NVIDIA GPUs when the model fits 60% of VRAM, and for
 Apple Silicon unified memory when the model fits the budget. AMD and Intel GPUs
@@ -450,6 +506,12 @@ the official `llama.cpp` b12613 build:
 | Qwen2.5-0.5B-Instruct, per-slot KV | Q4_K_M | 8192 | `--parallel 2`, `--no-kv-unified`, 512 MiB prompt cache |
 | Qwen2.5-0.5B-Instruct, RoPE/SWA | Q4_K_M | 8192 | `--rope-scaling yarn --rope-scale 2`, SWA checkpoints 8/2048 |
 | Qwen2.5-0.5B-Instruct, startup flags | Q4_K_M | 8192 | `--no-repack`, `--no-warmup`, `--cpu-range 0-3` |
+| Qwen2.5-0.5B-Instruct, `run --auto --prompt hello` | Q4_K_M | 2048 | light effort, q4_0 KV, real reply |
+| Sparse 30B GGUF header, 18 GB file | Q4_K_M | 4096 | streaming plan on a 9 GB budget, no OOM |
+
+The adaptive parser was checked against the real Qwen2.5-0.5B GGUF header
+(630M parameters, 24 layers, 14 heads, 2 KV heads) and against a sparse 30B
+GGUF header to exercise the streaming path without downloading 18 GB.
 
 Speeds are short-generation estimates and vary with prompt length, threads and
 CPU. The optimization runs above were verified with the real Qwen2.5-0.5B GGUF
@@ -468,6 +530,7 @@ The module layout:
 
 ```
 cmd/fastloadai/     CLI commands
+internal/adaptive/  GGUF metadata, effort tiers and parameter budgeting
 internal/catalog/   built-in model catalog and ranking
 internal/chat/      streaming chat loop and history trimming
 internal/config/    config file read and write

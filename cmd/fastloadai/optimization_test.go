@@ -152,3 +152,30 @@ func TestOptimizationPositiveToggles(t *testing.T) {
 		t.Fatalf("cache RAM = %v, want -1", opts.CacheRAMMiB)
 	}
 }
+
+func TestOptimizationAdaptiveFlags(t *testing.T) {
+	set := flag.NewFlagSet("test", flag.ContinueOnError)
+	optimize := registerOptimizationFlags(set)
+	if err := set.Parse([]string{"--effort", "deep", "--adaptive=false"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := optimize.validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	opts := optimize.options()
+	if opts.Effort != "deep" || opts.Adaptive {
+		t.Fatalf("unexpected adaptive options: %+v", opts)
+	}
+	if !optimize.touched() {
+		t.Fatal("adaptive flags should count as touched")
+	}
+
+	bad := flag.NewFlagSet("test", flag.ContinueOnError)
+	badOptimize := registerOptimizationFlags(bad)
+	if err := bad.Parse([]string{"--effort", "maximum"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := badOptimize.validate(); err == nil {
+		t.Fatal("unknown effort should fail validation")
+	}
+}
