@@ -1,0 +1,25 @@
+# Maintainer: FastLoadAI maintainers <maintainers@fastloadai.invalid>
+pkgname=fastloadai-bin
+pkgver=1.1.0
+pkgrel=1
+pkgdesc='Hardware-aware local GGUF model runner and chat UI for llama.cpp (prebuilt binary)'
+arch=('x86_64' 'aarch64')
+url='https://github.com/ciao22king/FastLoadAI'
+license=('Apache-2.0')
+provides=('fastloadai')
+conflicts=('fastloadai')
+optdepends=('llama.cpp-git: llama-server and llama-quantize runtime (AUR)')
+source_x86_64=("$url/releases/download/v$pkgver/fastloadai-$pkgver-linux-amd64.tar.gz")
+source_aarch64=("$url/releases/download/v$pkgver/fastloadai-$pkgver-linux-arm64.tar.gz")
+sha256sums_x86_64=('1b22c1ddfb71f29a6a59aa95c65bcafa6ab1a92bb41904073e89feab590d1113')
+sha256sums_aarch64=('dd84cf997de470263b64aa4c0ff359d3f7f5b5d8e6158832dc3ef94e5039cbbc')
+
+package() {
+  case "$CARCH" in
+    x86_64) asset=amd64 ;;
+    aarch64) asset=arm64 ;;
+  esac
+  install -Dm755 "$srcdir/fastloadai-$pkgver-linux-$asset/fastloadai" "$pkgdir/usr/bin/fastloadai"
+  install -Dm644 "$srcdir/fastloadai-$pkgver-linux-$asset/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 "$srcdir/fastloadai-$pkgver-linux-$asset/README.md" "$pkgdir/usr/share/doc/$pkgname/README.md"
+}

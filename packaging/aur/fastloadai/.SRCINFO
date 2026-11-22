@@ -9,6 +9,6 @@ license = Apache-2.0
 makedepends = go
 optdepends = llama.cpp-git: llama-server and llama-quantize runtime (AUR)
 source = fastloadai-1.1.0.tar.gz::https://github.com/ciao22king/FastLoadAI/archive/refs/tags/v1.1.0.tar.gz
-sha256sums = SKIP
+sha256sums = dbc44e8561e7d3da483027efc3558a386fbd740866f3d73b5af84d6bb59d11c5
 
 pkgname = fastloadai
