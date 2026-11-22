@@ -37,3 +37,7 @@ cd /path/to/tur
 `packaging/build-packages.sh` builds the Termux and Debian `.deb` files plus
 the GitHub Pages APT repository. `.github/workflows/packages.yml` runs it for
 tagged releases and publishes the repository to GitHub Pages.
+
+Prebuilt `.deb` files are attached to GitHub releases. The Termux APT
+repository is <https://ciao22king.github.io/FastLoadAI/termux>; the root README
+has the `pkg` commands.

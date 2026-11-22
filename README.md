@@ -78,7 +78,8 @@ release and install it directly:
 pkg install ./fastloadai_<version>_aarch64.deb
 ```
 
-Or use the GitHub Pages APT repository:
+Use the `x86_64` file on Intel Chromebooks and Android emulators. Or use the
+GitHub Pages APT repository:
 
 ```bash
 echo "deb [trusted=yes] https://ciao22king.github.io/FastLoadAI/termux stable main" \
