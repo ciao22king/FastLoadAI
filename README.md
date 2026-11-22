@@ -57,6 +57,60 @@ go build -o fastloadai ./cmd/fastloadai
 ./fastloadai --help
 ```
 
+### Prebuilt packages
+
+Every tagged release publishes Linux tarballs and Debian packages. The
+`Packages` workflow also publishes an unsigned APT repository on GitHub Pages.
+
+#### Termux
+
+The package is submitted to TUR. Once it is accepted:
+
+```bash
+pkg install tur-repo
+pkg install fastloadai
+```
+
+You can also download the `.deb` for your architecture from the latest GitHub
+release and install it directly:
+
+```bash
+pkg install ./fastloadai_<version>_aarch64.deb
+```
+
+Or use the GitHub Pages APT repository:
+
+```bash
+echo "deb [trusted=yes] https://ciao22king.github.io/FastLoadAI/termux stable main" \
+  > "$PREFIX/etc/apt/sources.list.d/fastloadai.list"
+pkg update
+pkg install fastloadai
+```
+
+The Termux package depends on `llama-cpp`, which provides `llama-server` and
+`llama-quantize`.
+
+#### Debian and Ubuntu
+
+```bash
+echo "deb [trusted=yes] https://ciao22king.github.io/FastLoadAI/debian stable main" \
+  | sudo tee /etc/apt/sources.list.d/fastloadai.list
+sudo apt update
+sudo apt install fastloadai
+```
+
+The Debian package contains only the FastLoadAI binary. Install `llama.cpp`
+separately so `llama-server` is on `PATH`.
+
+The APT repositories are not GPG-signed, so `[trusted=yes]` is required. Use
+them only if you trust this repository and the GitHub Pages deployment.
+
+#### Go
+
+```bash
+go install github.com/ciao22king/FastLoadAI/cmd/fastloadai@latest
+```
+
 ### Nix
 
 The repository is a flake:
@@ -72,8 +126,8 @@ with `CGO_ENABLED=0`, so the result is a static binary.
 
 ### Termux (Android)
 
-The Termux recipe lives in `packaging/termux/fastloadai`. Copy it into a
-`termux-packages` checkout and build it:
+For `pkg` packages, see [Prebuilt packages](#termux) above. To build the
+Termux recipe yourself, copy it into a `termux-packages` checkout:
 
 ```bash
 cp -a packaging/termux/fastloadai /path/to/termux-packages/packages/

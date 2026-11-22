@@ -31,3 +31,9 @@ cp -a packaging/termux/fastloadai /path/to/tur/tur/
 cd /path/to/tur
 ./build-package.sh fastloadai
 ```
+
+## Prebuilt packages
+
+`packaging/build-packages.sh` builds the Termux and Debian `.deb` files plus
+the GitHub Pages APT repository. `.github/workflows/packages.yml` runs it for
+tagged releases and publishes the repository to GitHub Pages.

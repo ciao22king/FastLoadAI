@@ -17,3 +17,6 @@ venv/
 # Nix build output
 /result
 /result-*
+
+# Package build output
+/dist/
