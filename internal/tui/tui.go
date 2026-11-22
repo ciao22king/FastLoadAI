@@ -12,10 +12,11 @@ import (
 
 	"github.com/ciao22king/FastLoadAI/internal/hardware"
 	"github.com/ciao22king/FastLoadAI/internal/model"
+	"github.com/ciao22king/FastLoadAI/internal/optimization"
 )
 
 // Version is shown in the banner and by --version.
-const Version = "0.7.0"
+const Version = "1.0.0"
 
 const (
 	Reset   = "\033[0m"
@@ -212,6 +213,18 @@ func RenderKV(title string, rows [][2]string, theme Theme, indent string) string
 	return strings.Join(lines, "\n")
 }
 
+// fitDetails drops trailing details instead of truncating the whole line.
+func fitDetails(details []string, width int) string {
+	for len(details) > 0 {
+		text := strings.Join(details, " · ")
+		if VisibleWidth(text) <= width {
+			return text
+		}
+		details = details[:len(details)-1]
+	}
+	return ""
+}
+
 // RenderBanner renders the boxed header shown at chat startup.
 func RenderBanner(modelName string, config model.Config, theme Theme, width int) string {
 	if width == 0 {
@@ -222,6 +235,9 @@ func RenderBanner(modelName string, config model.Config, theme Theme, width int)
 	}
 	inner := width - 4
 	var details []string
+	if config.OptimizationProfile != "" && config.OptimizationProfile != "auto" {
+		details = append(details, "profile "+config.OptimizationProfile)
+	}
 	if config.Quantization != "" {
 		details = append(details, config.Quantization)
 	}
@@ -229,20 +245,29 @@ func RenderBanner(modelName string, config model.Config, theme Theme, width int)
 		details = append(details, fmt.Sprintf("ctx %d", config.ContextSize))
 	}
 	if config.CPUThreads != 0 {
-		details = append(details, fmt.Sprintf("threads %d", config.CPUThreads))
+		details = append(details, fmt.Sprintf("%d thr", config.CPUThreads))
 	}
 	if config.NGPULayers == 0 {
-		details = append(details, "CPU only")
+		details = append(details, "CPU")
 	} else {
-		details = append(details, fmt.Sprintf("GPU layers %d", config.NGPULayers))
+		details = append(details, fmt.Sprintf("GPU %d", config.NGPULayers))
 	}
 	if config.Mmap {
-		details = append(details, "mmap on")
+		details = append(details, "mmap")
 	} else {
-		details = append(details, "mmap off")
+		details = append(details, "no-mmap")
 	}
 	if config.LowMemory {
-		details = append(details, "low memory")
+		details = append(details, "low-mem")
+	}
+	if config.FlashAttention == "on" {
+		details = append(details, "FA")
+	}
+	if config.KVCacheTypeK != "" && config.KVCacheTypeK != "f16" {
+		details = append(details, "KV "+config.KVCacheTypeK)
+	}
+	if config.MoE {
+		details = append(details, "MoE")
 	}
 	if config.ModelSizeGB > 0 {
 		details = append(details, FormatSize(config.ModelSizeGB))
@@ -258,7 +283,7 @@ func RenderBanner(modelName string, config model.Config, theme Theme, width int)
 		row("v"+Version+"  ·  hardware-aware, privacy-first", Dim),
 		theme.Paint("├"+strings.Repeat("─", inner)+"┤", Grey),
 		row("model   "+modelName, Bold),
-		row(strings.Join(details, "  ·  "), Dim),
+		row(fitDetails(details, inner), Dim),
 		row("/help commands  ·  /exit quit", Dim),
 		theme.Paint("╰"+strings.Repeat("─", inner)+"╯", Grey),
 	}
@@ -523,6 +548,7 @@ func RenderPlan(config model.Config, output string, theme Theme) string {
 	if config.LowMemory {
 		rows = append(rows, [2]string{"Low memory mode", "on"})
 	}
+	rows = append(rows, optimization.SummaryRows(config)...)
 	rows = append(rows, [2]string{"Config file", output})
 	return RenderKV("Runtime plan", rows, theme, "  ")
 }

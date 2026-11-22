@@ -11,6 +11,7 @@ import (
 	"github.com/ciao22king/FastLoadAI/internal/hardware"
 	"github.com/ciao22king/FastLoadAI/internal/hf"
 	"github.com/ciao22king/FastLoadAI/internal/model"
+	"github.com/ciao22king/FastLoadAI/internal/optimization"
 	"github.com/ciao22king/FastLoadAI/internal/tui"
 )
 
@@ -26,13 +27,14 @@ type downloadOptions struct {
 	Specs     *model.Specs
 	DryRun    bool
 	Force     bool
+	Optimize  optimization.Options
 }
 
 func commandDownload(args []string) int {
-	positional, flags := splitArgs(args, map[string]bool{
+	positional, flags := splitArgs(args, withOptimizationValueFlags(map[string]bool{
 		"--file": true, "--directory": true, "--output": true, "--token": true,
 		"--revision": true, "--prefer": true, "--workers": true,
-	})
+	}))
 	set := flag.NewFlagSet("download", flag.ContinueOnError)
 	file := set.String("file", "", "explicit GGUF file or shard")
 	directory := set.String("directory", "models", "download directory")
@@ -44,7 +46,12 @@ func commandDownload(args []string) int {
 	dryRun := set.Bool("dry-run", false, "show the plan without downloading")
 	force := set.Bool("force", false, "download even when the model may not fit")
 	noColor := set.Bool("no-color", false, "disable color")
+	optimize := registerOptimizationFlags(set)
 	if !parseFlags(set, flags) {
+		return 2
+	}
+	if err := optimize.validate(); err != nil {
+		fmt.Fprintf(os.Stderr, "Invalid optimization flag: %v\n", err)
 		return 2
 	}
 	if len(positional) == 0 {
@@ -54,7 +61,7 @@ func commandDownload(args []string) int {
 	opts := downloadOptions{
 		Repo: positional[0], File: *file, Directory: *directory, Output: *output,
 		Token: tokenValue(*token), Revision: *revision, Prefer: *prefer,
-		Workers: *workers, DryRun: *dryRun, Force: *force,
+		Workers: *workers, DryRun: *dryRun, Force: *force, Optimize: optimize.options(),
 	}
 	_, code := performDownload(context.Background(), opts, themeFor(*noColor))
 	return code
@@ -100,6 +107,14 @@ func performDownload(ctx context.Context, opts downloadOptions, theme tui.Theme)
 		rows = append([][2]string{{"Revision", opts.Revision}}, rows...)
 	}
 	if opts.DryRun {
+		profile := opts.Optimize.Profile
+		if profile == "" {
+			profile = "auto"
+		}
+		rows = append(rows, [2]string{"Optimization", profile})
+		if optimization.DetectMoE("", opts.Repo) {
+			rows = append(rows, [2]string{"Model type", "Mixture of Experts (MoE)"})
+		}
 		fmt.Println(tui.RenderKV("Download plan (dry run)", rows, theme, "  "))
 		if fit == "too_large" {
 			fmt.Println(theme.Paint("This file is larger than the estimated memory. Use --prefer speed, a smaller model, or --force.", tui.Yellow))
@@ -143,20 +158,26 @@ func performDownload(ctx context.Context, opts downloadOptions, theme tui.Theme)
 	cfg.Quantization = hf.QuantLabel(group.Name)
 	cfg.QuantizationFile = group.Name
 	cfg.ModelSizeBytes = sizeBytes
-	cfg.LlamaCPPMoe = "Depends on architecture support in the installed llama.cpp build."
+	cfg = optimization.Apply(cfg, modelPath, opts.Repo, opts.Optimize)
 	if err := saveConfig(opts.Output, cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "Could not write %s: %v\n", opts.Output, err)
 		return model.Config{}, 1
 	}
-	fmt.Println(tui.RenderKV("Model ready", [][2]string{
+	rows = [][2]string{
 		{"Model", modelPath},
 		{"Quantization", cfg.Quantization},
 		{"Size", sizeLabel(group)},
 		{"Model fit", cfg.ModelFit},
 		{"Context", fmt.Sprintf("%d", cfg.ContextSize)},
 		{"Threads", fmt.Sprintf("%d", cfg.CPUThreads)},
-		{"Config file", opts.Output},
-	}, theme, "  "))
+		{"Profile", cfg.OptimizationProfile},
+	}
+	if cfg.MoE {
+		rows = append(rows, [2]string{"Model type", "Mixture of Experts (MoE)"})
+	}
+	rows = append(rows, [2]string{"Flash attention", cfg.FlashAttention}, [2]string{"KV cache", cfg.KVCacheTypeK})
+	rows = append(rows, [2]string{"Config file", opts.Output})
+	fmt.Println(tui.RenderKV("Model ready", rows, theme, "  "))
 	return cfg, 0
 }
 

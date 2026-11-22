@@ -14,12 +14,17 @@ runs locally: no prompt or model data leaves the machine.
 - Parallel shard downloads with an auto-tuned worker pool (up to 16 workers).
 - Hardware probing, Hugging Face metadata and doctor checks run concurrently.
 - One-command download and chat: `fastloadai run qwen2.5-0.5b`.
+- Automatic optimization profiles: `auto`, `speed`, `balanced`, `memory` and `quality`.
+- MoE-aware CPU expert offload, GPU expert cache and tensor placement overrides.
+- Flash Attention, quantized KV cache, KV reuse, context shift and SWA cache.
+- Speculative decoding with ngram lookup or a separate draft model.
+- Batch/ubatch, parallel slots, thread-batch, NUMA, GPU split and priority tuning.
 - Full-screen chat UI with streaming, scrollback, input history and a status bar.
 - Streaming chat with history trimming, retry, context usage and session stats.
 - A polished terminal UI with a banner, spinner, colour themes and summaries.
 - CPU and NVIDIA GPU detection, Apple Silicon unified memory support.
 - Container-aware limits from cgroups, so Docker memory and CPU caps are honoured.
-- `scan`, `suggest`, `download`, `plan`, `models`, `doctor`, `run` and `quantize`.
+- `scan`, `suggest`, `download`, `plan`, `optimize`, `models`, `doctor`, `run` and `quantize`.
 - JSON output for scripts on `scan`, `suggest` and `models`.
 
 ## Requirements
@@ -85,6 +90,8 @@ fastloadai download Qwen/Qwen2.5-7B-Instruct-GGUF --workers 8
 fastloadai models
 fastloadai models --json
 fastloadai plan ./model.gguf --output config.json
+fastloadai optimize qwen2.5-0.5b --profile speed
+fastloadai optimize ./model.gguf --profile memory --kv-cache q4_0
 fastloadai doctor
 fastloadai run
 fastloadai run qwen2.5-0.5b
@@ -93,6 +100,9 @@ fastloadai run Qwen/Qwen2.5-0.5B-Instruct-GGUF
 fastloadai run --prompt "Introduce yourself." --once
 fastloadai run --low-memory --ctx-size 1024
 fastloadai run --ctx-size 8192 --threads 6 --temperature 0.4
+fastloadai run qwen2.5-0.5b --profile speed --flash-attn on --kv-cache q8_0
+fastloadai run qwen2.5-0.5b --speculative --no-tui
+fastloadai run qwen2.5-0.5b --draft-model ./draft.gguf --draft-max 4
 fastloadai quantize ./model.gguf ./model-Q4_K_M.gguf --type Q4_K_M
 fastloadai --version
 ```
@@ -119,7 +129,12 @@ fits, the command refuses unless `--force` is set.
 quantization and fit. `--json` is available for scripts.
 
 `plan` writes a runtime config for this machine. Pass a local GGUF path to
-include its size and fit.
+include its size and fit. Optimization flags are accepted here too.
+
+`optimize` inspects a model, detects whether it is a Mixture of Experts model,
+and writes the best `llama.cpp` flags for the chosen profile. It is the explicit
+way to inspect or change the runtime plan without starting a server. Use
+`--json` to print the resulting config.
 
 `doctor` checks Go, RAM, disk, GPU, `llama-server`, `llama-quantize`, network
 access to Hugging Face, the config file, the model path and the model fit. It
@@ -134,6 +149,12 @@ path. If the model is missing, it downloads the best fit first, then starts
 - `--threads`, `--ctx-size`, `--gpu-layers` override the plan.
 - `--temperature`, `--max-tokens` and `--system` tune generation.
 - `--low-memory` forces a small context and small batches.
+- `--profile auto|speed|balanced|memory|quality` selects an optimization plan.
+- `--flash-attn`, `--kv-cache`, `--speculative` and `--draft-model` tune inference.
+- `--cpu-moe`, `--n-cpu-moe`, `--moe-cache-mib` and `--override-tensor` tune MoE.
+- `--batch-size`, `--ubatch-size`, `--threads-batch`, `--parallel` and `--no-cont-batching` tune batching.
+- `--load-mode`, `--mlock`, `--no-mmap`, `--lazy-mode`, `--no-kv-offload` tune memory.
+- `--cache-reuse`, `--context-shift`, `--swa-full`, `--numa`, `--split-mode`, `--tensor-split`, `--priority` and `--poll` are advanced knobs.
 - `--token`, `--revision`, `--force` and `--workers` work like `download`.
 - `--no-tui` uses the plain line-based chat instead of the full-screen UI.
 - `--no-color` disables ANSI colour for logs and CI.
@@ -192,6 +213,69 @@ GPU offload is enabled for NVIDIA GPUs when the model fits 60% of VRAM, and for
 Apple Silicon unified memory when the model fits the budget. AMD and Intel GPUs
 run on CPU, which is safe and still works.
 
+## Optimization profiles and llama.cpp flags
+
+FastLoadAI writes one config with all runtime settings. `optimize`, `plan`,
+`download` and `run` share the same flags, and `run` reuses the profile saved in
+the config unless a flag overrides it.
+
+| Profile | Goal | Typical choices |
+| --- | --- | --- |
+| `auto` | Pick from the hardware and model fit | `balanced`, or `memory` when RAM is tight |
+| `speed` | Fastest short answers | Flash Attention on, F16 KV, large batches, KV reuse, context shift |
+| `balanced` | Good default | Flash Attention auto, Q8_0 KV for 8K+ context, KV reuse |
+| `memory` | Smallest RAM/VRAM footprint | Q4_0 KV, 128-token batches, half the batch threads, no KV offload |
+| `quality` | Least numerical loss | F16 KV, no speculative decoding, conservative batching |
+
+The optimization layer covers these techniques:
+
+- **MoE CPU offload.** For Mixture of Experts models, attention and shared
+  weights stay on the GPU while experts stay in system RAM. FastLoadAI detects
+  common MoE names (`MoE`, `Mixtral`, `Qwen3-30B-A3B`, `Llama-4-16E`,
+  `DeepSeek-V3`, `gpt-oss`, `OLMoE`, and similar) and sets `--cpu-moe`.
+  Use `--n-cpu-moe N` to keep only the first N layers' experts on the CPU, or
+  `--override-tensor` for an exact llama.cpp placement rule.
+- **MoE expert cache.** `--moe-cache-mib` keeps the hottest experts in VRAM for
+  decode. `--moe-cache-cpu-share` lets the CPU compute a share of cache misses
+  instead of uploading them. This is the `-cmoe`/`--moe-cache-mib` path from
+  llama.cpp's MoE cache documentation.
+- **Flash Attention.** `--flash-attn on|off|auto` selects the fused attention
+  kernel. It is on for `speed` and `memory`, and automatic for `balanced` and
+  `quality`.
+- **KV cache quantization.** `--kv-cache` sets both `--cache-type-k` and
+  `--cache-type-v`. Common values are `f16`, `bf16`, `q8_0`, `q5_1`, `q4_0`
+  and `iq4_nl`; support depends on the llama.cpp build. Q8_0 is a small quality
+  loss for a large memory saving; Q4_0 is the memory-profile choice.
+- **Speculative decoding.** `--speculative` enables ngram lookup decoding with
+  no draft model. `--draft-model` loads a smaller draft GGUF and enables
+  `draft-simple`. `--spec-type` selects any llama.cpp type, including
+  `draft-eagle3`, `draft-mtp`, `ngram-simple` and `ngram-map-k`.
+  `--draft-max`, `--draft-min`, `--draft-p-min` and `--draft-gpu-layers` tune
+  the draft.
+- **Batching and slots.** `--batch-size`, `--ubatch-size`, `--parallel` and
+  `--no-cont-batching` map directly to llama.cpp. The memory profile uses small
+  batches; speed and balanced use large ones.
+- **Thread tuning.** Decode threads use physical/logical CPU limits from the
+  hardware scan. `--threads-batch` sets prompt-processing threads separately.
+- **Load and memory mode.** `--load-mode auto|none|mmap|mlock|mmap+mlock|dio`
+  controls weight loading. `--no-mmap` is an alias for `--load-mode none`;
+  `--mlock` is an alias for `--load-mode mmap+mlock`. `--lazy-mode` enables
+  on-demand tensor reads, and `--no-kv-offload` keeps the KV cache on the CPU.
+- **KV reuse and long chats.** `--cache-reuse N` reuses matching prompt chunks
+  through KV shifting. `--context-shift` keeps generation going when the
+  context fills. `--swa-full` uses the full-size sliding-window cache.
+- **Multi-GPU and NUMA.** `--split-mode none|layer|row|tensor`,
+  `--tensor-split 3,1` and `--numa distribute|isolate|numactl` expose llama.cpp
+  placement controls.
+- **Scheduling.** `--priority` maps to `--prio`; `--poll` maps to `--poll`.
+  `--no-op-offload` disables host tensor operation offload when a backend has a
+  bug with it.
+
+Only flags that differ from llama.cpp defaults are written to the command line.
+For example, F16 KV cache and `--flash-attn auto` are omitted, while
+`--flash-attn on`, `--cache-type-k q8_0`, `--cpu-moe` and `--spec-type
+ngram-simple` are passed.
+
 ## Docker
 
 The image is CPU-only and supports `linux/amd64` and `linux/arm64`.
@@ -224,8 +308,11 @@ docker compose run --rm fastloadai run qwen2.5-0.5b
 
 FastLoadAI generates separate runtime configs and never modifies model files.
 `quantize` wraps `llama-quantize`; converting Hugging Face checkpoints to GGUF
-is not automated. MoE models work only when the installed `llama.cpp` build
-supports the architecture.
+is not automated. MoE models work when the installed `llama.cpp` build supports
+the architecture; FastLoadAI adds the MoE placement flags but cannot add kernel
+support that the build does not have. Optimization flags are forwarded to
+`llama-server`, so an older build may reject a newer flag. Check
+`llama-server --help` or disable the flag with an explicit profile.
 
 GPU detection covers NVIDIA through `nvidia-smi` and Apple Silicon through
 Metal. Other GPUs are treated as CPU-only.
@@ -235,12 +322,19 @@ Metal. Other GPUs are treated as CPU-only.
 The Go build was tested end to end on a 4-vCPU, 15.6 GB CPU-only container with
 the official `llama.cpp` b12613 build:
 
-| Model | Quant | Context | Speed |
+| Model | Quant | Context | Verified result |
 | --- | --- | --- | --- |
-| Qwen2.5-0.5B-Instruct | Q4_K_M | 8192 | ~40-55 tok/s |
+| Qwen2.5-0.5B-Instruct | Q4_K_M | 8192 | ~4-5 tok/s (short reply) |
+| Qwen2.5-0.5B-Instruct, `speed` profile | Q4_K_M | 8192 | Flash Attention + KV reuse |
+| Qwen2.5-0.5B-Instruct, `balanced` profile | Q4_K_M | 8192 | Q8_0 KV cache |
+| Qwen2.5-0.5B-Instruct, `memory` profile | Q4_K_M | 4096 | Q4_0 KV cache, 128-token batches |
+| Qwen2.5-0.5B-Instruct, ngram speculative | Q4_K_M | 8192 | `--spec-type ngram-simple` |
+| Qwen2.5-0.5B-Instruct, draft model | Q4_K_M | 8192 | same file as draft, `draft-simple` |
 
 Speeds are short-generation estimates and vary with prompt length, threads and
-CPU.
+CPU. The optimization runs above were verified with the real Qwen2.5-0.5B GGUF
+and the official `llama.cpp` b12613 build. MoE detection and placement are
+covered by unit tests; the test container had no large MoE GGUF to load.
 
 ## Development
 
@@ -261,5 +355,6 @@ internal/hardware/  CPU, RAM, disk, GPU and cgroup detection
 internal/hf/        Hugging Face API, GGUF selection and downloads
 internal/llama/     llama-server command, process and readiness
 internal/model/     shared data types
+internal/optimization/  profiles, MoE detection and llama.cpp flag selection
 internal/tui/       terminal UI, colour, tables, spinner and stats
 ```

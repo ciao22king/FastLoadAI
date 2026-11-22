@@ -69,3 +69,17 @@ func TestRenderSummary(t *testing.T) {
 		t.Fatal("empty stats should render nothing")
 	}
 }
+
+func TestFitDetailsDropsTrailing(t *testing.T) {
+	parts := []string{"profile balanced", "Q4_K_M", "ctx 8192", "4 thr", "CPU", "mmap", "KV q8_0", "469 MB"}
+	got := fitDetails(parts, 30)
+	if VisibleWidth(got) > 30 {
+		t.Fatalf("fitDetails exceeded width: %q", got)
+	}
+	if !strings.Contains(got, "profile balanced") {
+		t.Fatalf("fitDetails dropped the leading detail: %q", got)
+	}
+	if strings.Contains(got, "469 MB") {
+		t.Fatalf("fitDetails kept a trailing detail that did not fit: %q", got)
+	}
+}

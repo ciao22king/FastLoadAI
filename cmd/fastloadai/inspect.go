@@ -8,6 +8,7 @@ import (
 
 	"github.com/ciao22king/FastLoadAI/internal/catalog"
 	"github.com/ciao22king/FastLoadAI/internal/hardware"
+	"github.com/ciao22king/FastLoadAI/internal/optimization"
 	"github.com/ciao22king/FastLoadAI/internal/tui"
 )
 
@@ -27,17 +28,25 @@ func commandScan(args []string) int {
 }
 
 func commandPlan(args []string) int {
+	positional, flags := splitArgs(args, withOptimizationValueFlags(map[string]bool{
+		"--output": true,
+	}))
 	set := flag.NewFlagSet("plan", flag.ContinueOnError)
 	output := set.String("output", defaultConfig, "config file to write")
 	lowMemory := set.Bool("low-memory", false, "force a smaller context and small batches")
 	noColor := set.Bool("no-color", false, "disable color")
-	if !parseFlags(set, args) {
+	optimize := registerOptimizationFlags(set)
+	if !parseFlags(set, flags) {
+		return 2
+	}
+	if err := optimize.validate(); err != nil {
+		fmt.Fprintf(os.Stderr, "Invalid optimization flag: %v\n", err)
 		return 2
 	}
 	specs := hardware.Detect()
 	modelPath := ""
-	if set.NArg() > 0 {
-		modelPath = absModelPath(set.Arg(0))
+	if len(positional) > 0 {
+		modelPath = absModelPath(positional[0])
 	}
 	cfg := hardware.RecommendSettings(specs, modelPath, 0)
 	cfg.ModelPath = modelPath
@@ -45,6 +54,7 @@ func commandPlan(args []string) int {
 		cfg.LowMemory = true
 		cfg.ContextSize = min(cfg.ContextSize, 1024)
 	}
+	cfg = optimization.Apply(cfg, modelPath, "", optimize.options())
 	if err := saveConfig(*output, cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "Could not write %s: %v\n", *output, err)
 		return 1

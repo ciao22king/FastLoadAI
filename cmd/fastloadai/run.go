@@ -12,16 +12,17 @@ import (
 	"github.com/ciao22king/FastLoadAI/internal/hardware"
 	"github.com/ciao22king/FastLoadAI/internal/hf"
 	"github.com/ciao22king/FastLoadAI/internal/model"
+	"github.com/ciao22king/FastLoadAI/internal/optimization"
 	"github.com/ciao22king/FastLoadAI/internal/tui"
 )
 
 func commandRun(args []string) int {
-	positional, flags := splitArgs(args, map[string]bool{
+	positional, flags := splitArgs(args, withOptimizationValueFlags(map[string]bool{
 		"--config": true, "--models-dir": true, "--prefer": true, "--token": true,
 		"--revision": true, "--prompt": true, "--threads": true, "--ctx-size": true,
 		"--gpu-layers": true, "--temperature": true, "--max-tokens": true, "--system": true,
 		"--workers": true,
-	})
+	}))
 	set := flag.NewFlagSet("run", flag.ContinueOnError)
 	configPath := set.String("config", defaultConfig, "config file")
 	modelsDir := set.String("models-dir", "models", "models directory")
@@ -41,7 +42,12 @@ func commandRun(args []string) int {
 	lowMemory := set.Bool("low-memory", false, "force a smaller context and small batches")
 	noColor := set.Bool("no-color", false, "disable color")
 	noTUI := set.Bool("no-tui", false, "use the plain line-based chat instead of the full-screen UI")
+	optimize := registerOptimizationFlags(set)
 	if !parseFlags(set, flags) {
+		return 2
+	}
+	if err := optimize.validate(); err != nil {
+		fmt.Fprintf(os.Stderr, "Invalid optimization flag: %v\n", err)
 		return 2
 	}
 	requested := ""
@@ -114,19 +120,44 @@ func commandRun(args []string) int {
 	if sizeBytes <= 0 {
 		sizeBytes = info.Size()
 	}
-	cfg = hardware.RecommendSettings(specs, modelPath, sizeBytes)
-	cfg.ModelPath = absModelPath(modelPath)
-	if cfg.ModelRepo == "" && requested != "" && isRepoReference(requested) {
-		cfg.ModelRepo = requested
+	saved := cfg
+	base := hardware.RecommendSettings(specs, modelPath, sizeBytes)
+	if exists {
+		base.Mmap = saved.Mmap
 	}
-	if cfg.Quantization == "" {
-		cfg.Quantization = hf.QuantLabel(modelPath)
+	base.ModelPath = absModelPath(modelPath)
+	sameModel := saved.ModelPath != "" && absModelPath(saved.ModelPath) == absModelPath(modelPath)
+	base.ModelRepo = saved.ModelRepo
+	if !sameModel && !isRepoReference(requested) {
+		base.ModelRepo = ""
 	}
+	if requested != "" && isRepoReference(requested) {
+		base.ModelRepo = requested
+	}
+	base.Quantization = saved.Quantization
+	if !sameModel || base.Quantization == "" {
+		base.Quantization = hf.QuantLabel(modelPath)
+	}
+	base.ModelSizeBytes = sizeBytes
 	if *lowMemory {
-		cfg.LowMemory = true
+		base.LowMemory = true
 		if *ctxSize == 0 {
-			cfg.ContextSize = min(cfg.ContextSize, 1024)
+			base.ContextSize = min(base.ContextSize, 1024)
 		}
+	}
+	if *threads > 0 {
+		base.CPUThreads = *threads
+	}
+	if *ctxSize > 0 {
+		base.ContextSize = *ctxSize
+	}
+	if *gpuLayers >= 0 {
+		base.NGPULayers = *gpuLayers
+	}
+	if saved.OptimizationProfile != "" && !optimize.touched() && !*lowMemory && sameModel {
+		cfg = optimization.Inherit(base, saved)
+	} else {
+		cfg = optimization.Apply(base, modelPath, base.ModelRepo, optimize.options())
 	}
 	if *threads > 0 {
 		cfg.CPUThreads = *threads

@@ -12,6 +12,7 @@ import (
 	"github.com/ciao22king/FastLoadAI/internal/hardware"
 	"github.com/ciao22king/FastLoadAI/internal/hf"
 	"github.com/ciao22king/FastLoadAI/internal/model"
+	"github.com/ciao22king/FastLoadAI/internal/optimization"
 	"github.com/ciao22king/FastLoadAI/internal/tui"
 )
 
@@ -117,6 +118,7 @@ func commandDoctor(args []string) int {
 				healthy = false
 			}
 		}
+		rows = append(rows, optimization.SummaryRows(cfg)...)
 	}
 	_ = hf.DefaultBaseURL
 	fmt.Println(tui.RenderKV("Environment check", rows, theme, "  "))

@@ -58,13 +58,46 @@ func (ui *terminalChat) headerLines() []string {
 	}
 	device := "CPU"
 	if ui.config.NGPULayers > 0 {
-		device = fmt.Sprintf("GPU %d layers", ui.config.NGPULayers)
+		device = fmt.Sprintf("GPU %d", ui.config.NGPULayers)
 	}
-	detail := fmt.Sprintf(" %s · ctx %d · %d threads · %s", quant, ui.config.ContextSize, ui.config.CPUThreads, device)
+	parts := []string{}
+	if ui.config.OptimizationProfile != "" && ui.config.OptimizationProfile != "auto" {
+		parts = append(parts, "profile "+ui.config.OptimizationProfile)
+	}
+	parts = append(parts, quant, fmt.Sprintf("ctx %d", ui.config.ContextSize), fmt.Sprintf("%d thr", ui.config.CPUThreads), device)
+	if ui.config.Mmap {
+		parts = append(parts, "mmap")
+	} else {
+		parts = append(parts, "no-mmap")
+	}
+	if ui.config.LowMemory {
+		parts = append(parts, "low-mem")
+	}
+	if ui.config.FlashAttention == "on" {
+		parts = append(parts, "FA")
+	}
+	if ui.config.KVCacheTypeK != "" && ui.config.KVCacheTypeK != "f16" {
+		parts = append(parts, "KV "+ui.config.KVCacheTypeK)
+	}
+	if ui.config.MoE {
+		parts = append(parts, "MoE")
+	}
 	if ui.config.ModelSizeBytes > 0 {
-		detail += " · " + tui.FormatSize(float64(ui.config.ModelSizeBytes)/(1024*1024*1024))
+		parts = append(parts, tui.FormatSize(float64(ui.config.ModelSizeBytes)/(1024*1024*1024)))
 	}
+	detail := " " + fitHeaderDetails(parts, ui.width-1)
 	return []string{title, ui.renderSegments([]segment{{detail, []string{tui.Dim}}}, ui.width)}
+}
+
+func fitHeaderDetails(parts []string, width int) string {
+	for len(parts) > 0 {
+		text := strings.Join(parts, " · ")
+		if tui.VisibleWidth(text) <= width {
+			return text
+		}
+		parts = parts[:len(parts)-1]
+	}
+	return ""
 }
 
 func (ui *terminalChat) divider() string {

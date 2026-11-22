@@ -48,11 +48,104 @@ func BuildCommand(executable, modelPath string, config model.Config, port int) [
 		"--ctx-size", strconv.Itoa(config.ContextSize),
 		"--n-gpu-layers", strconv.Itoa(config.NGPULayers),
 	}
-	if !config.Mmap {
-		args = append(args, "--no-mmap")
+	if config.FlashAttention != "" && config.FlashAttention != "auto" {
+		args = append(args, "--flash-attn", config.FlashAttention)
 	}
-	if config.LowMemory {
+	if config.KVCacheTypeK != "" && config.KVCacheTypeK != "f16" {
+		args = append(args, "--cache-type-k", config.KVCacheTypeK)
+	}
+	if config.KVCacheTypeV != "" && config.KVCacheTypeV != "f16" {
+		args = append(args, "--cache-type-v", config.KVCacheTypeV)
+	}
+	loadMode := config.LoadMode
+	if loadMode == "" && !config.Mmap {
+		loadMode = "none"
+	}
+	if loadMode != "" && loadMode != "auto" && loadMode != "mmap" {
+		args = append(args, "--load-mode", loadMode)
+	}
+	if config.LazyMode != "" && config.LazyMode != "auto" {
+		args = append(args, "--lazy-mode", config.LazyMode)
+	}
+	if config.NoKVOffload {
+		args = append(args, "--no-kv-offload")
+	}
+	if config.NoOpOffload {
+		args = append(args, "--no-op-offload")
+	}
+	if config.NoContBatching {
+		args = append(args, "--no-cont-batching")
+	}
+	if config.Parallel > 1 {
+		args = append(args, "--parallel", strconv.Itoa(config.Parallel))
+	}
+	if config.BatchSize > 0 && config.BatchSize != 2048 {
+		args = append(args, "--batch-size", strconv.Itoa(config.BatchSize))
+	}
+	if config.UBatchSize > 0 && config.UBatchSize != 512 {
+		args = append(args, "--ubatch-size", strconv.Itoa(config.UBatchSize))
+	}
+	if config.LowMemory && config.BatchSize == 0 && config.UBatchSize == 0 {
 		args = append(args, "--batch-size", "128", "--ubatch-size", "128")
+	}
+	if config.ThreadsBatch > 0 && config.ThreadsBatch != config.CPUThreads {
+		args = append(args, "--threads-batch", strconv.Itoa(config.ThreadsBatch))
+	}
+	if config.CacheReuse > 0 {
+		args = append(args, "--cache-reuse", strconv.Itoa(config.CacheReuse))
+	}
+	if config.ContextShift {
+		args = append(args, "--context-shift")
+	}
+	if config.SWAFull {
+		args = append(args, "--swa-full")
+	}
+	if config.NumA != "" {
+		args = append(args, "--numa", config.NumA)
+	}
+	if config.SplitMode != "" {
+		args = append(args, "--split-mode", config.SplitMode)
+	}
+	if config.TensorSplit != "" {
+		args = append(args, "--tensor-split", config.TensorSplit)
+	}
+	if config.CPUMoE {
+		args = append(args, "--cpu-moe")
+	} else if config.NCPUMoE > 0 {
+		args = append(args, "--n-cpu-moe", strconv.Itoa(config.NCPUMoE))
+	}
+	if config.MoECacheMiB > 0 {
+		args = append(args, "--moe-cache-mib", strconv.Itoa(config.MoECacheMiB))
+	}
+	if config.MoECacheCPUShare > 0 {
+		args = append(args, "--moe-cache-cpu-share", strconv.FormatFloat(config.MoECacheCPUShare, 'f', -1, 64))
+	}
+	if config.OverrideTensor != "" {
+		args = append(args, "--override-tensor", config.OverrideTensor)
+	}
+	if config.SpecType != "" {
+		args = append(args, "--spec-type", config.SpecType)
+	}
+	if config.DraftModel != "" {
+		args = append(args, "--model-draft", config.DraftModel)
+		if config.DraftGPULayers >= 0 {
+			args = append(args, "--gpu-layers-draft", strconv.Itoa(config.DraftGPULayers))
+		}
+		if config.DraftMax > 0 {
+			args = append(args, "--spec-draft-n-max", strconv.Itoa(config.DraftMax))
+		}
+		if config.DraftMin > 0 {
+			args = append(args, "--spec-draft-n-min", strconv.Itoa(config.DraftMin))
+		}
+		if config.DraftPMin > 0 {
+			args = append(args, "--spec-draft-p-min", strconv.FormatFloat(config.DraftPMin, 'f', -1, 64))
+		}
+	}
+	if config.Priority != 0 {
+		args = append(args, "--prio", strconv.Itoa(config.Priority))
+	}
+	if (config.Poll > 0 && config.Poll != 50) || (config.Poll == 0 && config.OptimizationProfile != "") {
+		args = append(args, "--poll", strconv.Itoa(config.Poll))
 	}
 	return args
 }

@@ -40,4 +40,39 @@ type Config struct {
 	QuantizationFile string `json:"quantization_file,omitempty"`
 	ModelSizeBytes   int64  `json:"model_size_bytes,omitempty"`
 	LlamaCPPMoe      string `json:"llama_cpp_moe,omitempty"`
+
+	// Optimization settings. Zero values mean "let FastLoadAI choose".
+	OptimizationProfile string  `json:"optimization_profile,omitempty"`
+	MoE                 bool    `json:"moe,omitempty"`
+	FlashAttention      string  `json:"flash_attention,omitempty"`
+	KVCacheTypeK        string  `json:"kv_cache_type_k,omitempty"`
+	KVCacheTypeV        string  `json:"kv_cache_type_v,omitempty"`
+	LoadMode            string  `json:"load_mode,omitempty"`
+	LazyMode            string  `json:"lazy_mode,omitempty"`
+	NoKVOffload         bool    `json:"no_kv_offload,omitempty"`
+	NoOpOffload         bool    `json:"no_op_offload,omitempty"`
+	NoContBatching      bool    `json:"no_cont_batching,omitempty"`
+	Parallel            int     `json:"parallel,omitempty"`
+	BatchSize           int     `json:"batch_size,omitempty"`
+	UBatchSize          int     `json:"ubatch_size,omitempty"`
+	ThreadsBatch        int     `json:"threads_batch,omitempty"`
+	NumA                string  `json:"numa,omitempty"`
+	SplitMode           string  `json:"split_mode,omitempty"`
+	TensorSplit         string  `json:"tensor_split,omitempty"`
+	CPUMoE              bool    `json:"cpu_moe,omitempty"`
+	NCPUMoE             int     `json:"n_cpu_moe,omitempty"`
+	MoECacheMiB         int     `json:"moe_cache_mib,omitempty"`
+	MoECacheCPUShare    float64 `json:"moe_cache_cpu_share,omitempty"`
+	OverrideTensor      string  `json:"override_tensor,omitempty"`
+	SpecType            string  `json:"spec_type,omitempty"`
+	DraftModel          string  `json:"draft_model,omitempty"`
+	DraftMax            int     `json:"draft_max,omitempty"`
+	DraftMin            int     `json:"draft_min,omitempty"`
+	DraftPMin           float64 `json:"draft_p_min,omitempty"`
+	DraftGPULayers      int     `json:"draft_gpu_layers,omitempty"`
+	CacheReuse          int     `json:"cache_reuse,omitempty"`
+	ContextShift        bool    `json:"context_shift,omitempty"`
+	SWAFull             bool    `json:"swa_full,omitempty"`
+	Priority            int     `json:"priority,omitempty"`
+	Poll                int     `json:"poll,omitempty"`
 }
