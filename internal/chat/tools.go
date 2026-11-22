@@ -335,7 +335,11 @@ func (t *Toolbox) listFiles(call ToolCall) ToolResult {
 	if len(files) == 0 {
 		return ToolResult{OK: true, Summary: "no files under " + relative, Content: "No files under " + relative + "."}
 	}
-	return ToolResult{OK: true, Summary: fmt.Sprintf("listed %d files", len(files)), Content: strings.Join(files, "\n")}
+	label := "files"
+	if len(files) == 1 {
+		label = "file"
+	}
+	return ToolResult{OK: true, Summary: fmt.Sprintf("listed %d %s", len(files), label), Content: strings.Join(files, "\n")}
 }
 
 func (t *Toolbox) searchWeb(call ToolCall) ToolResult {
