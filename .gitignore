@@ -13,3 +13,8 @@ fastloadai-config.json
 .openhands/
 .venv/
 venv/
+
+# Packaging build outputs
+/result
+/result-*
+*.rpm

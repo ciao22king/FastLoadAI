@@ -81,6 +81,40 @@ runtime dependencies from `llama.cpp-git` (AUR) or another llama.cpp build on
 `PATH`. The packaging sources live in `packaging/aur/fastloadai` and
 `packaging/aur/fastloadai-bin`.
 
+### Nix
+
+The repository is a flake:
+
+```bash
+nix run github:ciao22king/FastLoadAI
+nix build .#fastloadai
+nix profile install .#fastloadai
+```
+
+Inside a checkout, `nix develop` provides Go and `gopls`. The package builds
+with `CGO_ENABLED=0`, so the result is a static binary.
+
+### Fedora / COPR
+
+The Fedora spec is `packaging/fedora/fastloadai.spec`. It builds from the
+vendored source archive attached to the `v1.1.0` GitHub release, so COPR does
+not need network access for Go modules:
+
+```bash
+rpmbuild -bs packaging/fedora/fastloadai.spec
+```
+
+Upload the resulting source RPM to a COPR project. Once the project is
+enabled:
+
+```bash
+sudo dnf copr enable <owner>/fastloadai
+sudo dnf install fastloadai
+```
+
+`llama-server` and `llama-quantize` must be installed separately; FastLoadAI
+uses whichever build is on `PATH`.
+
 ## Quick start
 
 ```bash
