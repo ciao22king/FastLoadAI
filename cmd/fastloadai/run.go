@@ -40,6 +40,7 @@ func commandRun(args []string) int {
 	system := set.String("system", "", "replace the system prompt")
 	lowMemory := set.Bool("low-memory", false, "force a smaller context and small batches")
 	noColor := set.Bool("no-color", false, "disable color")
+	noTUI := set.Bool("no-tui", false, "use the plain line-based chat instead of the full-screen UI")
 	if !parseFlags(set, flags) {
 		return 2
 	}
@@ -151,7 +152,8 @@ func commandRun(args []string) int {
 	}
 	options := chat.Options{
 		InitialPrompt: *prompt, Temperature: *temperature, MaxTokens: *maxTokens,
-		SystemPrompt: *system, Once: *once, Color: !*noColor, ColorSet: *noColor,
+		SystemPrompt: *system, Once: *once, NoTUI: *noTUI,
+		Color: !*noColor, ColorSet: *noColor,
 	}
 	return chat.RunChat(modelPath, cfg, options)
 }

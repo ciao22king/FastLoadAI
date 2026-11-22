@@ -14,6 +14,7 @@ runs locally: no prompt or model data leaves the machine.
 - Parallel shard downloads with an auto-tuned worker pool (up to 16 workers).
 - Hardware probing, Hugging Face metadata and doctor checks run concurrently.
 - One-command download and chat: `fastloadai run qwen2.5-0.5b`.
+- Full-screen chat UI with streaming, scrollback, input history and a status bar.
 - Streaming chat with history trimming, retry, context usage and session stats.
 - A polished terminal UI with a banner, spinner, colour themes and summaries.
 - CPU and NVIDIA GPU detection, Apple Silicon unified memory support.
@@ -59,11 +60,16 @@ fastloadai run qwen2.5-0.5b
 ```
 
 `run` downloads the best fitting quantization when the model is not present,
-then opens the chat. Ask a question, or use `/help` inside the chat.
+then opens the full-screen chat. Ask a question, or use `/help` inside the chat.
 
 ```bash
 fastloadai run qwen2.5-0.5b --prompt "Explain GGUF in one sentence." --once
 ```
+
+The full-screen chat is used when both stdin and stdout are terminals. It has a
+conversation viewport, a multi-line input box, a status bar and streaming
+answers. Use `--no-tui` to force the plain line-based chat, for example in a
+terminal multiplexer that does not support alternate screens.
 
 ## Commands
 
@@ -82,6 +88,7 @@ fastloadai plan ./model.gguf --output config.json
 fastloadai doctor
 fastloadai run
 fastloadai run qwen2.5-0.5b
+fastloadai run qwen2.5-0.5b --no-tui
 fastloadai run Qwen/Qwen2.5-0.5B-Instruct-GGUF
 fastloadai run --prompt "Introduce yourself." --once
 fastloadai run --low-memory --ctx-size 1024
@@ -128,9 +135,24 @@ path. If the model is missing, it downloads the best fit first, then starts
 - `--temperature`, `--max-tokens` and `--system` tune generation.
 - `--low-memory` forces a small context and small batches.
 - `--token`, `--revision`, `--force` and `--workers` work like `download`.
+- `--no-tui` uses the plain line-based chat instead of the full-screen UI.
 - `--no-color` disables ANSI colour for logs and CI.
 
 `quantize` runs `llama-quantize` on an existing GGUF file.
+
+## Chat keys
+
+| Key | Action |
+| --- | --- |
+| `Enter` | Send the message |
+| `Ctrl+J` | Insert a newline without sending |
+| `↑` / `↓` | Browse input history |
+| `←` / `→` | Move the cursor |
+| `Home` / `End` | Jump to the start or end of the line |
+| `PgUp` / `PgDn` | Scroll the conversation |
+| `Tab` | Complete a slash command |
+| `Ctrl+C` | Cancel while streaming, or exit when idle |
+| `Ctrl+D` | Exit when the input is empty |
 
 ## Chat commands
 

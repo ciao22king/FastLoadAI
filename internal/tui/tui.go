@@ -15,7 +15,7 @@ import (
 )
 
 // Version is shown in the banner and by --version.
-const Version = "0.6.0"
+const Version = "0.7.0"
 
 const (
 	Reset   = "\033[0m"
@@ -28,6 +28,7 @@ const (
 	Magenta = "35"
 	Cyan    = "36"
 	Grey    = "90"
+	Reverse = "7"
 )
 
 var ansiRE = regexp.MustCompile(`\x1b\[[0-9;]*m`)

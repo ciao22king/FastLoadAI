@@ -67,7 +67,7 @@ Commands:
   suggest    Recommend catalog models that fit this machine.
   download   Download a GGUF quantization from Hugging Face.
   plan       Build a runtime plan and write the config file.
-  run        Download if needed, then open the streaming chat.
+  run        Download if needed, then open the full-screen chat.
   models     List downloaded GGUF models.
   doctor     Check the runtime, model files and configuration.
   quantize   Quantize a GGUF file with llama-quantize.
@@ -77,6 +77,7 @@ Examples:
   fastloadai suggest
   fastloadai run qwen2.5-0.5b
   fastloadai run Qwen/Qwen2.5-0.5B-Instruct-GGUF --prompt "Hello"
+  fastloadai run qwen2.5-0.5b --no-tui
   fastloadai download Qwen/Qwen2.5-0.5B-Instruct-GGUF --dry-run
   fastloadai download Qwen/Qwen2.5-7B-Instruct-GGUF --workers 8
   fastloadai models --json

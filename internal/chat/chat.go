@@ -33,8 +33,40 @@ type Options struct {
 	MaxTokens     int
 	SystemPrompt  string
 	Once          bool
+	NoTUI         bool
 	Color         bool
 	ColorSet      bool
+}
+
+type sessionSettings struct {
+	systemPrompt  string
+	temperature   float64
+	tokenLimit    int
+	historyBudget int
+}
+
+func resolveSettings(config model.Config, options Options) sessionSettings {
+	systemPrompt := options.SystemPrompt
+	if systemPrompt == "" {
+		systemPrompt = SystemPrompt
+	}
+	temperature := options.Temperature
+	if temperature <= 0 {
+		temperature = 0.7
+	}
+	tokenLimit := options.MaxTokens
+	if tokenLimit <= 0 {
+		tokenLimit = 1024
+		if config.ContextSize > 0 {
+			tokenLimit = min(1024, max(128, config.ContextSize/4))
+		}
+	}
+	return sessionSettings{
+		systemPrompt:  systemPrompt,
+		temperature:   temperature,
+		tokenLimit:    tokenLimit,
+		historyBudget: int(float64(config.ContextSize) * 0.6),
+	}
 }
 
 // StreamChat sends messages and yields content chunks as they arrive.
@@ -150,25 +182,19 @@ func RunChat(modelPath string, config model.Config, options Options) int {
 		}
 		return 1
 	}
-	fmt.Println(theme.Paint("Ready.", tui.Green) + " " + theme.Paint("Type /help for commands, /exit to quit.", tui.Dim))
-	interactive := tui.StdoutIsTerminal()
+	interactive := tui.StdinIsTerminal() && tui.StdoutIsTerminal()
 	oneShot := options.Once || (options.InitialPrompt != "" && !tui.StdinIsTerminal())
-	systemPrompt := options.SystemPrompt
-	if systemPrompt == "" {
-		systemPrompt = SystemPrompt
-	}
-	temperature := options.Temperature
-	if temperature <= 0 {
-		temperature = 0.7
-	}
-	tokenLimit := options.MaxTokens
-	if tokenLimit <= 0 {
-		tokenLimit = 1024
-		if config.ContextSize > 0 {
-			tokenLimit = min(1024, max(128, config.ContextSize/4))
+	settings := resolveSettings(config, options)
+	if !oneShot && interactive && !options.NoTUI {
+		if code, ok := runTerminalChat(server, config, options, theme, settings); ok {
+			return code
 		}
 	}
-	historyBudget := int(float64(config.ContextSize) * 0.6)
+	fmt.Println(theme.Paint("Ready.", tui.Green) + " " + theme.Paint("Type /help for commands, /exit to quit.", tui.Dim))
+	systemPrompt := settings.systemPrompt
+	temperature := settings.temperature
+	tokenLimit := settings.tokenLimit
+	historyBudget := settings.historyBudget
 	stats := tui.ChatStats{}
 	messages := []model.Message{{Role: "system", Content: systemPrompt}}
 	nextPrompt := options.InitialPrompt
