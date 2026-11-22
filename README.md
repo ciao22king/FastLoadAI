@@ -26,6 +26,7 @@ runs locally: no prompt or model data leaves the machine.
 - Batch/ubatch, parallel slots, thread-batch, NUMA, GPU split and priority tuning.
 - Full-screen chat UI with streaming, scrollback, input history, a welcome panel and a status bar.
 - `/copy` for the terminal clipboard, `/save` for a Markdown transcript, and `/retry` for regeneration.
+- Optional file and web tools: sandboxed read/write, DuckDuckGo/Wikipedia search and page fetch.
 - Streaming chat with history trimming, retry, context usage and session stats.
 - A polished terminal UI with a banner, spinner, colour themes and summaries.
 - CPU and NVIDIA GPU detection, Apple Silicon unified memory support.
@@ -166,6 +167,16 @@ then opens the full-screen chat. Ask a question, or use `/help` inside the chat.
 fastloadai run qwen2.5-0.5b --prompt "Explain GGUF in one sentence." --once
 ```
 
+Give the model a sandbox and web access with `--tools`:
+
+```bash
+fastloadai run qwen2.5-0.5b --tools --workdir ./sandbox \
+  --prompt "Create hello.py that prints hello, then search the web for Go 1.24 release notes." --once
+```
+
+The model can read and write files only under `--workdir` (default: the
+current directory). It cannot run shell commands.
+
 A Hugging Face repository with safetensors weights works without a GGUF file:
 
 ```bash
@@ -209,6 +220,7 @@ fastloadai doctor
 fastloadai run
 fastloadai run qwen2.5-0.5b
 fastloadai run qwen2.5-0.5b --no-tui
+fastloadai run qwen2.5-0.5b --tools --workdir ./sandbox
 fastloadai run Qwen/Qwen2.5-0.5B-Instruct-GGUF
 fastloadai run --auto --prompt "Introduce yourself." --once
 fastloadai run --prompt "Explain step by step how TCP works" --once
@@ -287,6 +299,7 @@ path. If the model is missing, it downloads the best fit first, then starts
 - `--load-mode`, `--mlock`, `--no-mmap`, `--lazy-mode`, `--no-kv-offload` tune memory.
 - `--cache-reuse`, `--context-shift`, `--swa-full`, `--numa`, `--split-mode`, `--tensor-split`, `--priority` and `--poll` are advanced knobs.
 - `--token`, `--revision`, `--force` and `--workers` work like `download`.
+- `--tools` enables sandboxed file read/write, web search and URL fetch. `--workdir` sets the sandbox root; `--max-tool-rounds` limits tool iterations (default 4).
 - `--no-tui` uses the plain line-based chat instead of the full-screen UI.
 - `--no-color` disables ANSI colour for logs and CI.
 
@@ -326,6 +339,7 @@ automatically and cache the result.
 | `/retry` | Regenerate the last answer |
 | `/copy` | Copy the last answer to the terminal clipboard (OSC 52) |
 | `/save` | Save the conversation as a Markdown file |
+| `/tools` | Show whether file and web tools are enabled |
 | `/clear` | Reset the conversation and session stats |
 | `/exit`, `/quit` | Close the chat and stop the server |
 
@@ -333,8 +347,44 @@ automatically and cache the result.
 a compact summary with turns, tokens, speed and time.
 
 History is trimmed by estimated token budget, not by a fixed message count, so
-long conversations stay inside the context window. The chat has no file or
-shell tools; it only sees the conversation.
+long conversations stay inside the context window. Without `--tools`, the chat
+has no file or shell access; it only sees the conversation.
+
+## File and web tools
+
+Tools are opt-in. Start the chat with `--tools`; without it, the model can only
+see the conversation. The file sandbox is the `--workdir` directory (default
+`.`). Paths containing `..`, symlinks that escape the root, and `.git`, `.ssh`,
+`.aws` or `.openhands` are rejected. Existing absolute paths are rejected too;
+a nonexistent absolute path is reduced to its file name inside the sandbox,
+because small models often invent paths such as `/home/you/hello.py`.
+
+| Tool | Arguments | What it does |
+| --- | --- | --- |
+| `write_file` | `path`, `content` | Create or overwrite a file, including parent directories. |
+| `read_file` | `path` | Read one UTF-8 text file. |
+| `list_files` | `path` | List files under the sandbox, up to 200. |
+| `search_web` | `query` | Search DuckDuckGo and Wikipedia, returning titles, URLs and snippets. |
+| `fetch_url` | `url` | Fetch a public http/https page and return readable text. |
+
+FastLoadAI sends OpenAI-compatible tool schemas to `llama-server` and enables
+its Jinja chat template. The model answers with native `tool_calls`; a fenced
+`tool` block is still parsed as a fallback for models without tool support:
+
+````text
+```tool
+{"name":"write_file","arguments":{"path":"hello.py","content":"print('hello')\n"}}
+```
+````
+
+FastLoadAI executes the call, prints a `tool ›` card with the result and sends
+the result back to the model. The loop stops after `--max-tool-rounds` (default 4)
+or when the model answers without a tool block. Tool output is treated as
+untrusted data: a web page cannot grant itself new permissions.
+
+Private and loopback URLs are blocked by `fetch_url`; only public pages are
+reachable. `write_file` is limited to 2 MiB, `read_file` to 256 KiB, and
+`fetch_url` to 12,000 characters of readable text. There is no shell tool.
 
 ## How the runtime plan works
 

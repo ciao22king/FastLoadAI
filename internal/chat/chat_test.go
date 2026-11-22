@@ -2,6 +2,7 @@ package chat
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -46,6 +47,33 @@ func TestStreamChat(t *testing.T) {
 	}
 	if got.String() != "Hello world" {
 		t.Fatalf("stream = %q", got.String())
+	}
+	if err := <-errs; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStreamChatWithToolsReturnsNativeCalls(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Tools []ToolDefinition `json:"tools"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if len(body.Tools) != 1 || body.Tools[0].Function.Name != "write_file" {
+			t.Errorf("tools = %+v", body.Tools)
+		}
+		fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"write_file","arguments":"{\"path\":\"hello.py\",\"content\":\"print('hello')\"}"}}]}}]}`)
+	}))
+	defer server.Close()
+	tools := []ToolDefinition{{Type: "function", Function: FunctionDefinition{Name: "write_file"}}}
+	chunks, callsCh, errs := StreamChatWithTools(context.Background(), server.URL, []model.Message{{Role: "user", Content: "hi"}}, 0.1, 32, tools)
+	for range chunks {
+	}
+	calls := <-callsCh
+	if len(calls) != 1 || calls[0].Name != "write_file" || calls[0].NativeID != "call_1" {
+		t.Fatalf("calls = %+v", calls)
 	}
 	if err := <-errs; err != nil {
 		t.Fatal(err)

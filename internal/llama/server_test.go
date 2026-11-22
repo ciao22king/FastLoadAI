@@ -102,3 +102,12 @@ func TestBuildCommandNoKVUnifiedAndCPURange(t *testing.T) {
 		t.Errorf("args %q should prefer --cpu-range", joined)
 	}
 }
+
+func TestBuildCommandJinjaForTools(t *testing.T) {
+	args := BuildCommand("llama-server", "/models/a.gguf", model.Config{
+		CPUThreads: 4, ContextSize: 2048, Jinja: true,
+	}, 8123)
+	if joined := strings.Join(args, " "); !strings.Contains(joined, "--jinja") {
+		t.Fatalf("args %q missing --jinja", joined)
+	}
+}

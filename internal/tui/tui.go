@@ -345,6 +345,7 @@ var helpEntries = [][2]string{
 	{"/retry", "Regenerate the last answer"},
 	{"/copy", "Copy the last answer to the terminal clipboard"},
 	{"/save", "Save the conversation as Markdown"},
+	{"/tools", "Show whether file and web tools are enabled"},
 	{"/exit", "Close the chat and stop the server"},
 }
 

@@ -82,6 +82,9 @@ func (ui *terminalChat) headerLines() []string {
 	if ui.config.ModelSizeBytes > 0 {
 		parts = append(parts, tui.FormatSize(float64(ui.config.ModelSizeBytes)/(1024*1024*1024)))
 	}
+	if ui.tools != nil {
+		parts = append(parts, fmt.Sprintf("tools %d", len(ui.tools.Names())))
+	}
 	detail := " " + fitHeaderDetails(parts, ui.width-1)
 	return []string{title, ui.renderSegments([]segment{{detail, []string{tui.Dim}}}, ui.width)}
 }
@@ -119,6 +122,9 @@ func (ui *terminalChat) statusLine() string {
 		if elapsed > 0 {
 			left += fmt.Sprintf(" · %.0f tok/s", float64(tui.EstimateTokens(ui.streaming))/elapsed)
 		}
+	}
+	if ui.tools != nil && ui.toolRounds > 0 {
+		left += fmt.Sprintf(" · tools %d/%d", ui.toolRounds, ui.maxToolRounds)
 	}
 	if ui.scroll > 0 {
 		left += fmt.Sprintf(" · ↑%d", ui.scroll)
@@ -235,10 +241,15 @@ func (ui *terminalChat) welcomeLines() []string {
 	rows := [][2]string{
 		{"FastLoadAI is ready", ""},
 		{"model", model},
-		{"ask", "Type a question. Paste text with Ctrl+Shift+V."},
-		{"help", "/help commands · Tab completes · ↑/↓ history"},
-		{"save", "/save writes Markdown · /copy copies the answer"},
 	}
+	if ui.tools != nil {
+		rows = append(rows, [2]string{"tools", fmt.Sprintf("%d enabled · /tools shows the workspace root", len(ui.tools.Names()))})
+	}
+	rows = append(rows,
+		[2]string{"ask", "Type a question. Paste text with Ctrl+Shift+V."},
+		[2]string{"help", "/help commands · Tab completes · ↑/↓ history"},
+		[2]string{"save", "/save writes Markdown · /copy copies the answer"},
+	)
 	out := []string{"  " + ui.theme.Paint("╭"+strings.Repeat("─", max(2, width-4))+"╮", tui.Grey)}
 	for index, row := range rows {
 		style := []string{tui.Dim}
@@ -261,6 +272,13 @@ func (ui *terminalChat) renderItem(item chatItem) []string {
 		return ui.renderLabeled("you › ", []string{tui.Bold, tui.Cyan}, item.content, nil)
 	case "assistant":
 		return ui.renderAssistant(item.content, false)
+	case "tool":
+		parts := strings.SplitN(item.content, "\n", 2)
+		out := ui.renderLabeled("tool › ", []string{tui.Bold, tui.Cyan}, parts[0], nil)
+		if len(parts) == 2 {
+			out = append(out, ui.renderLabeled("       ", nil, parts[1], []string{item.style})...)
+		}
+		return out
 	default:
 		return ui.renderInfo(item.content, item.style)
 	}

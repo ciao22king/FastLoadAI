@@ -3,8 +3,23 @@ package model
 
 // Message is one chat turn sent to llama-server.
 type Message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role       string     `json:"role"`
+	Content    string     `json:"content"`
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
+}
+
+// ToolCall is the OpenAI-compatible tool call shape used by llama-server.
+type ToolCall struct {
+	ID       string       `json:"id,omitempty"`
+	Type     string       `json:"type,omitempty"`
+	Function FunctionCall `json:"function"`
+}
+
+// FunctionCall carries a tool name and its JSON-encoded arguments.
+type FunctionCall struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
 }
 
 // Specs is the detected hardware profile.
@@ -51,6 +66,7 @@ type Config struct {
 
 	// Optimization settings. Zero values mean "let FastLoadAI choose".
 	OptimizationProfile string  `json:"optimization_profile,omitempty"`
+	Jinja               bool    `json:"jinja,omitempty"`
 	MoE                 bool    `json:"moe,omitempty"`
 	FlashAttention      string  `json:"flash_attention,omitempty"`
 	KVCacheTypeK        string  `json:"kv_cache_type_k,omitempty"`

@@ -3,6 +3,7 @@ package chat
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/signal"
@@ -94,21 +95,27 @@ type terminalChat struct {
 
 	scroll int
 
-	busy      bool
-	streaming string
-	streamErr error
-	cancelled bool
-	chunks    <-chan string
-	errs      <-chan error
-	cancel    context.CancelFunc
-	started   time.Time
-	spinner   int
-	exitCode  int
+	tools         *Toolbox
+	maxToolRounds int
+	toolRounds    int
+
+	busy        bool
+	streaming   string
+	streamErr   error
+	cancelled   bool
+	chunks      <-chan string
+	toolCallsCh <-chan []ToolCall
+	nativeCalls []ToolCall
+	errs        <-chan error
+	cancel      context.CancelFunc
+	started     time.Time
+	spinner     int
+	exitCode    int
 }
 
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
-var chatCommands = []string{"/help", "/clear", "/stats", "/context", "/retry", "/copy", "/save", "/exit", "/quit"}
+var chatCommands = []string{"/help", "/clear", "/stats", "/context", "/retry", "/copy", "/save", "/tools", "/exit", "/quit"}
 
 // runTerminalChat opens a full-screen chat when both stdin and stdout are TTYs.
 func runTerminalChat(server *llama.Server, config model.Config, options Options, theme tui.Theme, settings sessionSettings) (int, bool) {
@@ -123,6 +130,7 @@ func runTerminalChat(server *llama.Server, config model.Config, options Options,
 	ui := &terminalChat{
 		server: server, config: config, options: options, theme: theme,
 		settings: settings, state: state, width: width, height: height,
+		tools: settings.tools, maxToolRounds: settings.maxToolRounds,
 		messages: []model.Message{{Role: "system", Content: settings.systemPrompt}},
 	}
 	ui.enter()
@@ -153,17 +161,27 @@ func runTerminalChat(server *llama.Server, config model.Config, options Options,
 		case chunk, ok := <-ui.chunks:
 			if !ok {
 				ui.chunks = nil
-				if ui.errs == nil {
+				if ui.errs == nil && ui.toolCallsCh == nil {
 					ui.finishStream()
 				}
 				continue
 			}
 			ui.streaming += chunk
 			ui.dirty = true
+		case calls, ok := <-ui.toolCallsCh:
+			if !ok {
+				ui.toolCallsCh = nil
+				if ui.chunks == nil && ui.errs == nil {
+					ui.finishStream()
+				}
+				continue
+			}
+			ui.nativeCalls = calls
+			ui.dirty = true
 		case streamErr, ok := <-ui.errs:
 			if !ok {
 				ui.errs = nil
-				if ui.chunks == nil {
+				if ui.chunks == nil && ui.toolCallsCh == nil {
 					ui.finishStream()
 				}
 				continue
@@ -401,6 +419,12 @@ func (ui *terminalChat) command(text string) {
 		ui.addInfo(ui.stats.RenderStats(tui.Theme{}), tui.Dim)
 	case "/context":
 		ui.addInfo(tui.RenderContext(tui.ConversationTokens(ui.messages), ui.config.ContextSize, tui.Theme{}), tui.Dim)
+	case "/tools":
+		if ui.tools == nil {
+			ui.addInfo("Tools are off. Start FastLoadAI with --tools to enable file and web tools.", tui.Dim)
+			return
+		}
+		ui.addInfo(ui.tools.Status(), tui.Dim)
 	case "/copy":
 		answer := ui.lastAssistant()
 		if answer == "" {
@@ -511,15 +535,29 @@ func (ui *terminalChat) sendPrompt(prompt string) {
 	}
 	ui.messages = append(ui.messages, model.Message{Role: "user", Content: prompt})
 	ui.appendTranscript(chatItem{role: "user", content: prompt})
+	ui.toolRounds = 0
+	ui.startStream()
+}
+
+func (ui *terminalChat) startStream() {
+	if ui.cancel != nil {
+		ui.cancel()
+	}
 	ui.streaming = ""
 	ui.streamErr = nil
+	ui.nativeCalls = nil
 	ui.cancelled = false
 	ui.busy = true
 	ui.started = time.Now()
 	ui.scroll = 0
 	ctx, cancel := context.WithCancel(context.Background())
 	ui.cancel = cancel
-	ui.chunks, ui.errs = StreamChat(ctx, ui.server.BaseURL, ui.messages, ui.settings.temperature, ui.settings.tokenLimit)
+	if ui.tools != nil {
+		ui.chunks, ui.toolCallsCh, ui.errs = StreamChatWithTools(ctx, ui.server.BaseURL, ui.messages, ui.settings.temperature, ui.settings.tokenLimit, ui.tools.Definitions())
+	} else {
+		ui.chunks, ui.errs = StreamChat(ctx, ui.server.BaseURL, ui.messages, ui.settings.temperature, ui.settings.tokenLimit)
+		ui.toolCallsCh = nil
+	}
 	ui.dirty = true
 }
 
@@ -552,19 +590,39 @@ func (ui *terminalChat) finishStream() {
 	case ui.streamErr != nil:
 		ui.dropLastUser()
 		ui.addInfo("Error: "+ui.streamErr.Error(), tui.Red)
-	case answer == "":
+	case answer == "" && len(ui.nativeCalls) == 0:
 		ui.dropLastUser()
 		ui.addInfo("The model returned an empty answer. Try again.", tui.Yellow)
 	default:
+		calls := ui.nativeCalls
+		visible := answer
+		if len(calls) == 0 && ui.tools != nil {
+			calls, visible = ParseToolCalls(answer, ui.tools.Known())
+		}
+		if ui.runTools(calls, visible, answer, len(ui.nativeCalls) > 0) {
+			return
+		}
+		if len(calls) > 0 {
+			ui.addInfo("Tool round limit reached; answer without more tools.", tui.Yellow)
+			if visible != "" {
+				answer = visible
+			} else if answer == "" {
+				answer = "Tool round limit reached; no further tools were run."
+			}
+		}
+		ui.nativeCalls = nil
 		ui.appendTranscript(chatItem{role: "assistant", content: answer})
 		ui.messages = append(ui.messages, model.Message{Role: "assistant", Content: answer})
 		ui.stats.Record(tui.EstimateTokens(lastUserPrompt(ui.messages)), tui.EstimateTokens(answer), time.Since(ui.started))
+
 	}
 	ui.streaming = ""
 	ui.streamErr = nil
 	ui.cancelled = false
 	ui.busy = false
 	ui.chunks = nil
+	ui.toolCallsCh = nil
+	ui.nativeCalls = nil
 	ui.errs = nil
 	if ui.cancel != nil {
 		ui.cancel()
@@ -582,11 +640,70 @@ func (ui *terminalChat) dropLastUser() {
 
 func lastUserPrompt(messages []model.Message) string {
 	for index := len(messages) - 1; index >= 0; index-- {
-		if messages[index].Role == "user" {
+		if messages[index].Role == "user" && !strings.HasPrefix(messages[index].Content, "TOOL RESULT") {
 			return messages[index].Content
 		}
 	}
 	return ""
+}
+
+func (ui *terminalChat) runTools(calls []ToolCall, visible, raw string, native bool) bool {
+	if ui.tools == nil || len(calls) == 0 || ui.toolRounds >= ui.maxToolRounds {
+		return false
+	}
+	ui.toolRounds++
+	if visible != "" {
+		ui.appendTranscript(chatItem{role: "assistant", content: visible})
+	}
+	if native {
+		assistant := model.Message{Role: "assistant", Content: visible}
+		for index, call := range calls {
+			id := call.NativeID
+			if id == "" {
+				id = fmt.Sprintf("call-%d", index+1)
+			}
+			arguments, _ := json.Marshal(call.Arguments)
+			assistant.ToolCalls = append(assistant.ToolCalls, model.ToolCall{
+				ID: id, Type: "function",
+				Function: model.FunctionCall{Name: call.Name, Arguments: string(arguments)},
+			})
+		}
+		ui.messages = append(ui.messages, assistant)
+	} else {
+		ui.messages = append(ui.messages, model.Message{Role: "assistant", Content: raw})
+	}
+	for index, call := range calls {
+		ui.addInfo("→ "+CallSummary(call), tui.Cyan)
+		result := ui.tools.Execute(call)
+		if result.OK {
+			ui.addInfo("✓ "+result.Summary, tui.Green)
+		} else {
+			ui.addInfo("✗ "+result.Error, tui.Red)
+		}
+		if native {
+			id := call.NativeID
+			if id == "" {
+				id = fmt.Sprintf("call-%d", index+1)
+			}
+			ui.messages = append(ui.messages, model.Message{Role: "tool", ToolCallID: id, Content: FormatToolResult(call, result)})
+		} else {
+			ui.messages = append(ui.messages, model.Message{Role: "user", Content: FormatToolResult(call, result)})
+		}
+	}
+	ui.streaming = ""
+	ui.streamErr = nil
+	ui.cancelled = false
+	ui.chunks = nil
+	ui.toolCallsCh = nil
+	ui.nativeCalls = nil
+	ui.errs = nil
+	ui.busy = false
+	if ui.cancel != nil {
+		ui.cancel()
+		ui.cancel = nil
+	}
+	ui.startStream()
+	return true
 }
 
 func (ui *terminalChat) conversationHeight() int {

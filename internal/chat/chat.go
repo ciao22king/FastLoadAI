@@ -36,6 +36,8 @@ type Options struct {
 	NoTUI         bool
 	Color         bool
 	ColorSet      bool
+	Tools         *Toolbox
+	MaxToolRounds int
 }
 
 type sessionSettings struct {
@@ -43,12 +45,17 @@ type sessionSettings struct {
 	temperature   float64
 	tokenLimit    int
 	historyBudget int
+	tools         *Toolbox
+	maxToolRounds int
 }
 
 func resolveSettings(config model.Config, options Options) sessionSettings {
 	systemPrompt := options.SystemPrompt
 	if systemPrompt == "" {
 		systemPrompt = SystemPrompt
+		if options.Tools != nil {
+			systemPrompt = "You are FastLoadAI, a concise local assistant running on the user's computer."
+		}
 	}
 	temperature := options.Temperature
 	if temperature <= 0 {
@@ -61,11 +68,20 @@ func resolveSettings(config model.Config, options Options) sessionSettings {
 			tokenLimit = min(1024, max(128, config.ContextSize/4))
 		}
 	}
+	maxToolRounds := options.MaxToolRounds
+	if maxToolRounds <= 0 {
+		maxToolRounds = 4
+	}
+	if options.Tools != nil {
+		systemPrompt += "\n\n" + options.Tools.NativeInstructions()
+	}
 	return sessionSettings{
 		systemPrompt:  systemPrompt,
 		temperature:   temperature,
 		tokenLimit:    tokenLimit,
 		historyBudget: int(float64(config.ContextSize) * 0.6),
+		tools:         options.Tools,
+		maxToolRounds: maxToolRounds,
 	}
 }
 
@@ -132,6 +148,48 @@ func StreamChat(ctx context.Context, baseURL string, messages []model.Message, t
 	return chunks, errs
 }
 
+func streamAnswer(server *llama.Server, messages []model.Message, temperature float64, tokenLimit int, theme tui.Theme, interactive bool, assistantLabel string, tools *Toolbox) (string, []ToolCall, time.Duration, error) {
+	fmt.Printf("\n%s ", assistantLabel)
+	spinner := tui.StartSpinner("waiting for the first token…", theme)
+	started := time.Now()
+	var parts []string
+	firstChunk := true
+	streamCtx, streamCancel := context.WithCancel(context.Background())
+	defer streamCancel()
+	var chunks <-chan string
+	var callCh <-chan []ToolCall
+	var errs <-chan error
+	if tools != nil {
+		chunks, callCh, errs = StreamChatWithTools(streamCtx, server.BaseURL, messages, temperature, tokenLimit, tools.Definitions())
+	} else {
+		chunks, errs = StreamChat(streamCtx, server.BaseURL, messages, temperature, tokenLimit)
+	}
+	for chunk := range chunks {
+		if firstChunk {
+			firstChunk = false
+			spinner.Stop()
+			if interactive {
+				fmt.Print("\r\033[K" + assistantLabel + " ")
+			}
+		}
+		fmt.Print(chunk)
+		parts = append(parts, chunk)
+	}
+	spinner.Stop()
+	var streamErr error
+	select {
+	case streamErr = <-errs:
+	default:
+	}
+	var calls []ToolCall
+	if callCh != nil {
+		if native, ok := <-callCh; ok {
+			calls = native
+		}
+	}
+	return strings.TrimSpace(strings.Join(parts, "")), calls, time.Since(started), streamErr
+}
+
 // TrimHistory drops the oldest user/assistant pairs until the estimate fits.
 func TrimHistory(messages []model.Message, budget int) []model.Message {
 	for len(messages) > 3 && tui.ConversationTokens(messages) > budget {
@@ -158,6 +216,12 @@ func RunChat(modelPath string, config model.Config, options Options) int {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, theme.Paint("llama-server not found. Install a llama.cpp build that includes the server and put it on PATH.", tui.Red))
 		return 2
+	}
+	if options.Tools != nil {
+		config.Jinja = true
+		// Quantized KV caches measurably degrade tool selection on small models.
+		config.KVCacheTypeK = "f16"
+		config.KVCacheTypeV = "f16"
 	}
 	fmt.Println(tui.RenderBanner(filepath.Base(modelPath), config, theme, 0))
 	loading := tui.StartSpinner("loading model, this can take a while…", theme)
@@ -242,6 +306,14 @@ func RunChat(modelPath string, config model.Config, options Options) int {
 			fmt.Println()
 			fmt.Println(tui.RenderContext(tui.ConversationTokens(messages), config.ContextSize, theme))
 			continue
+		case "/tools":
+			fmt.Println()
+			if settings.tools == nil {
+				fmt.Println(theme.Paint("Tools are off. Start FastLoadAI with --tools to enable file and web tools.", tui.Dim))
+			} else {
+				fmt.Println(theme.Paint(settings.tools.Status(), tui.Dim))
+			}
+			continue
 		}
 		if command == "/retry" {
 			if len(messages) < 2 || messages[len(messages)-1].Role != "assistant" {
@@ -266,49 +338,91 @@ func RunChat(modelPath string, config model.Config, options Options) int {
 			}
 		}
 		messages = append(messages, model.Message{Role: "user", Content: prompt})
-		fmt.Printf("\n%s ", assistantLabel)
-		spinner := tui.StartSpinner("waiting for the first token…", theme)
-		started := time.Now()
-		var parts []string
-		firstChunk := true
-		streamCtx, streamCancel := context.WithCancel(context.Background())
-		chunks, errs := StreamChat(streamCtx, server.BaseURL, messages, temperature, tokenLimit)
-		for chunk := range chunks {
-			if firstChunk {
-				firstChunk = false
-				spinner.Stop()
-				if interactive {
-					fmt.Print("\r\033[K" + assistantLabel + " ")
+		toolRounds := 0
+		var answer string
+		var nativeCalls []ToolCall
+		var elapsed time.Duration
+		var streamErr error
+		for {
+			answer, nativeCalls, elapsed, streamErr = streamAnswer(server, messages, temperature, tokenLimit, theme, interactive, assistantLabel, settings.tools)
+			if streamErr != nil {
+				messages = messages[:len(messages)-1]
+				fmt.Println()
+				fmt.Println(theme.Paint("Error: "+streamErr.Error(), tui.Red))
+				if oneShot {
+					return 1
+				}
+				break
+			}
+			if answer == "" && len(nativeCalls) == 0 {
+				messages = messages[:len(messages)-1]
+				fmt.Println()
+				fmt.Println(theme.Paint("The model returned an empty answer. Try again.", tui.Yellow))
+				if oneShot {
+					return 1
+				}
+				break
+			}
+			calls := nativeCalls
+			visible := answer
+			if len(calls) == 0 && settings.tools != nil {
+				calls, visible = ParseToolCalls(answer, settings.tools.Known())
+			}
+			if len(calls) > 0 && toolRounds < settings.maxToolRounds {
+				toolRounds++
+				if visible != "" {
+					fmt.Println()
+					fmt.Println(visible)
+				}
+				native := len(nativeCalls) > 0
+				if native {
+					assistant := model.Message{Role: "assistant", Content: visible}
+					for index, call := range calls {
+						id := call.NativeID
+						if id == "" {
+							id = fmt.Sprintf("call-%d", index+1)
+						}
+						arguments, _ := json.Marshal(call.Arguments)
+						assistant.ToolCalls = append(assistant.ToolCalls, model.ToolCall{
+							ID: id, Type: "function",
+							Function: model.FunctionCall{Name: call.Name, Arguments: string(arguments)},
+						})
+					}
+					messages = append(messages, assistant)
+				} else {
+					messages = append(messages, model.Message{Role: "assistant", Content: answer})
+				}
+				for index, call := range calls {
+					fmt.Println()
+					fmt.Println(theme.Paint("tool ›", tui.Bold, tui.Cyan), CallSummary(call))
+					result := settings.tools.Execute(call)
+					if result.OK {
+						fmt.Println(theme.Paint("  ✓ "+result.Summary, tui.Green))
+					} else {
+						fmt.Println(theme.Paint("  ✗ "+result.Error, tui.Red))
+					}
+					if native {
+						id := call.NativeID
+						if id == "" {
+							id = fmt.Sprintf("call-%d", index+1)
+						}
+						messages = append(messages, model.Message{Role: "tool", ToolCallID: id, Content: FormatToolResult(call, result)})
+					} else {
+						messages = append(messages, model.Message{Role: "user", Content: FormatToolResult(call, result)})
+					}
+				}
+				nativeCalls = nil
+				continue
+			}
+			if len(calls) > 0 {
+				fmt.Println(theme.Paint("Tool round limit reached; answer without more tools.", tui.Yellow))
+				if visible != "" {
+					answer = visible
 				}
 			}
-			fmt.Print(chunk)
-			parts = append(parts, chunk)
+			break
 		}
-		spinner.Stop()
-		streamCancel()
-		var streamErr error
-		select {
-		case streamErr = <-errs:
-		default:
-		}
-		elapsed := time.Since(started)
-		if streamErr != nil {
-			messages = messages[:len(messages)-1]
-			fmt.Println()
-			fmt.Println(theme.Paint("Error: "+streamErr.Error(), tui.Red))
-			if oneShot {
-				return 1
-			}
-			continue
-		}
-		answer := strings.TrimSpace(strings.Join(parts, ""))
 		if answer == "" {
-			messages = messages[:len(messages)-1]
-			fmt.Println()
-			fmt.Println(theme.Paint("The model returned an empty answer. Try again.", tui.Yellow))
-			if oneShot {
-				return 1
-			}
 			continue
 		}
 		stats.Record(tui.EstimateTokens(prompt), tui.EstimateTokens(answer), elapsed)
@@ -319,4 +433,86 @@ func RunChat(modelPath string, config model.Config, options Options) int {
 			return 0
 		}
 	}
+}
+
+func StreamChatWithTools(ctx context.Context, baseURL string, messages []model.Message, temperature float64, maxTokens int, tools []ToolDefinition) (<-chan string, <-chan []ToolCall, <-chan error) {
+	chunks := make(chan string)
+	callCh := make(chan []ToolCall, 1)
+	errs := make(chan error, 1)
+	go func() {
+		defer close(chunks)
+		defer close(callCh)
+		defer close(errs)
+		payload := map[string]any{
+			"model": "local-model", "messages": messages,
+			"temperature": temperature, "max_tokens": maxTokens, "stream": false,
+		}
+		if len(tools) > 0 {
+			payload["tools"] = tools
+			payload["tool_choice"] = "auto"
+		}
+		encoded, _ := json.Marshal(payload)
+		request, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/v1/chat/completions", strings.NewReader(string(encoded)))
+
+		if err != nil {
+			errs <- err
+			return
+		}
+		request.Header.Set("Content-Type", "application/json")
+		response, err := (&http.Client{Timeout: 0}).Do(request)
+		if err != nil {
+			errs <- fmt.Errorf("lost connection to the model: %w", err)
+			return
+		}
+		defer response.Body.Close()
+		if response.StatusCode < 200 || response.StatusCode >= 300 {
+			body, _ := io.ReadAll(io.LimitReader(response.Body, 8192))
+			errs <- fmt.Errorf("llama-server rejected the request: %s", strings.TrimSpace(string(body)))
+			return
+		}
+		var event struct {
+			Choices []struct {
+				Message struct {
+					Content   string `json:"content"`
+					ToolCalls []struct {
+						ID       string `json:"id"`
+						Type     string `json:"type"`
+						Function struct {
+							Name      string `json:"name"`
+							Arguments string `json:"arguments"`
+						} `json:"function"`
+					} `json:"tool_calls"`
+				} `json:"message"`
+			} `json:"choices"`
+		}
+		if err := json.NewDecoder(io.LimitReader(response.Body, 16<<20)).Decode(&event); err != nil {
+			errs <- fmt.Errorf("could not read the model response: %w", err)
+			return
+		}
+		if len(event.Choices) == 0 {
+			errs <- fmt.Errorf("the model returned no choices")
+			return
+		}
+		message := event.Choices[0].Message
+
+		if message.Content != "" {
+			chunks <- message.Content
+		}
+		var calls []ToolCall
+		for _, native := range message.ToolCalls {
+			call := ToolCall{Name: native.Function.Name, Arguments: map[string]json.RawMessage{}}
+			if native.Function.Arguments != "" {
+				if err := json.Unmarshal([]byte(native.Function.Arguments), &call.Arguments); err != nil {
+					errs <- fmt.Errorf("invalid arguments for %s: %w", native.Function.Name, err)
+					return
+				}
+			}
+			call.NativeID = native.ID
+			calls = append(calls, call)
+		}
+		if len(calls) > 0 {
+			callCh <- calls
+		}
+	}()
+	return chunks, callCh, errs
 }

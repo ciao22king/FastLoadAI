@@ -48,6 +48,9 @@ func BuildCommand(executable, modelPath string, config model.Config, port int) [
 		"--ctx-size", strconv.Itoa(config.ContextSize),
 		"--n-gpu-layers", strconv.Itoa(config.NGPULayers),
 	}
+	if config.Jinja {
+		args = append(args, "--jinja")
+	}
 	if config.FlashAttention != "" && config.FlashAttention != "auto" {
 		args = append(args, "--flash-attn", config.FlashAttention)
 	}

@@ -23,7 +23,7 @@ func commandRun(args []string) int {
 		"--config": true, "--models-dir": true, "--prefer": true, "--token": true,
 		"--revision": true, "--prompt": true, "--threads": true, "--ctx-size": true,
 		"--gpu-layers": true, "--temperature": true, "--max-tokens": true, "--system": true,
-		"--workers": true,
+		"--workers": true, "--workdir": true, "--max-tool-rounds": true,
 	}))
 	set := flag.NewFlagSet("run", flag.ContinueOnError)
 	configPath := set.String("config", defaultConfig, "config file")
@@ -45,6 +45,9 @@ func commandRun(args []string) int {
 	autoModel := set.Bool("auto", false, "pick a model that matches the prompt effort and memory budget")
 	noColor := set.Bool("no-color", false, "disable color")
 	noTUI := set.Bool("no-tui", false, "use the plain line-based chat instead of the full-screen UI")
+	tools := set.Bool("tools", false, "enable file read/write and web search tools")
+	workdir := set.String("workdir", ".", "workspace root for file tools")
+	maxToolRounds := set.Int("max-tool-rounds", 4, "maximum tool calls before the final answer")
 	optimize := registerOptimizationFlags(set)
 	if !parseFlags(set, flags) {
 		return 2
@@ -215,10 +218,24 @@ func commandRun(args []string) int {
 	} else if cfg.ModelFit == "tight" {
 		fmt.Fprintln(os.Stderr, theme.Paint("Note: this model is close to the memory limit. Close other apps if loading fails.", tui.Yellow))
 	}
+	var toolbox *chat.Toolbox
+	if *tools {
+		var toolErr error
+		toolbox, toolErr = chat.NewToolbox(*workdir)
+		if toolErr != nil {
+			fmt.Fprintf(os.Stderr, "Could not enable tools: %v\n", toolErr)
+			return 2
+		}
+		if *maxToolRounds < 1 {
+			*maxToolRounds = 1
+		}
+		fmt.Fprintln(os.Stderr, theme.Paint("Tools enabled: "+toolbox.Status(), tui.Dim))
+	}
 	options := chat.Options{
 		InitialPrompt: *prompt, Temperature: *temperature, MaxTokens: *maxTokens,
 		SystemPrompt: *system, Once: *once, NoTUI: *noTUI,
 		Color: !*noColor, ColorSet: *noColor,
+		Tools: toolbox, MaxToolRounds: *maxToolRounds,
 	}
 	return chat.RunChat(modelPath, cfg, options)
 }
