@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -188,6 +189,130 @@ func availableRAMGB(total float64) float64 {
 	return available
 }
 
+// parseCPUList expands Linux CPU lists such as "0-3,8-11".
+func parseCPUList(value string) []int {
+	seen := map[int]bool{}
+	for _, part := range strings.Split(value, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		loText, hiText, hasRange := strings.Cut(part, "-")
+		lo, err := strconv.Atoi(strings.TrimSpace(loText))
+		if err != nil || lo < 0 {
+			continue
+		}
+		hi := lo
+		if hasRange {
+			hi, err = strconv.Atoi(strings.TrimSpace(hiText))
+			if err != nil || hi < lo {
+				continue
+			}
+		}
+		for cpu := lo; cpu <= hi && cpu < 4096; cpu++ {
+			seen[cpu] = true
+		}
+	}
+	cpus := make([]int, 0, len(seen))
+	for cpu := range seen {
+		cpus = append(cpus, cpu)
+	}
+	sort.Ints(cpus)
+	return cpus
+}
+
+// formatCPUList compresses sorted CPU IDs back into a Linux CPU list.
+func formatCPUList(cpus []int) string {
+	if len(cpus) == 0 {
+		return ""
+	}
+	sort.Ints(cpus)
+	var parts []string
+	start, previous := cpus[0], cpus[0]
+	flush := func() {
+		if start == previous {
+			parts = append(parts, strconv.Itoa(start))
+		} else {
+			parts = append(parts, strconv.Itoa(start)+"-"+strconv.Itoa(previous))
+		}
+	}
+	for _, cpu := range cpus[1:] {
+		if cpu == previous+1 {
+			previous = cpu
+			continue
+		}
+		flush()
+		start, previous = cpu, cpu
+	}
+	flush()
+	return strings.Join(parts, ",")
+}
+
+// cpuMask converts CPU IDs to the hexadecimal mask expected by --cpu-mask.
+func cpuMask(cpus []int) string {
+	if len(cpus) == 0 {
+		return ""
+	}
+	sort.Ints(cpus)
+	digits := cpus[len(cpus)-1]/4 + 1
+	nibbles := make([]byte, digits)
+	for _, cpu := range cpus {
+		nibbles[cpu/4] |= 1 << (cpu % 4)
+	}
+	const hex = "0123456789abcdef"
+	var out strings.Builder
+	started := false
+	for index := digits - 1; index >= 0; index-- {
+		value := nibbles[index]
+		if !started && value == 0 && index > 0 {
+			continue
+		}
+		started = true
+		out.WriteByte(hex[value])
+	}
+	if out.Len() == 0 {
+		return "0"
+	}
+	return out.String()
+}
+
+// hybridTopology detects P-core and E-core CPU sets on Intel hybrid Linux and
+// Apple Silicon. The mask is only usable on Linux.
+func hybridTopology() (string, string, string, int, int, bool) {
+	switch runtime.GOOS {
+	case "linux":
+		performance := parseCPUList(readText("/sys/bus/event_source/devices/cpu_core/cpus"))
+		efficiency := parseCPUList(readText("/sys/bus/event_source/devices/cpu_atom/cpus"))
+		if len(performance) == 0 || len(efficiency) == 0 {
+			performance, efficiency = nil, nil
+			matches, _ := filepath.Glob("/sys/devices/system/cpu/cpu[0-9]*/topology/core_type")
+			for _, path := range matches {
+				name := filepath.Base(filepath.Dir(filepath.Dir(path)))
+				cpu, err := strconv.Atoi(strings.TrimPrefix(name, "cpu"))
+				if err != nil {
+					continue
+				}
+				switch strings.TrimSpace(readText(path)) {
+				case "2":
+					performance = append(performance, cpu)
+				case "1":
+					efficiency = append(efficiency, cpu)
+				}
+			}
+		}
+		if len(performance) > 0 && len(efficiency) > 0 {
+			return formatCPUList(performance), formatCPUList(efficiency), cpuMask(performance), len(performance), len(efficiency), true
+		}
+	case "darwin":
+		performance := int(commandFloat("sysctl", "-n", "hw.perflevel0.logicalcpu"))
+		efficiency := int(commandFloat("sysctl", "-n", "hw.perflevel1.logicalcpu"))
+		if performance > 0 && efficiency > 0 {
+			return "", "", "", performance, efficiency, true
+		}
+	}
+	return "", "", "", 0, 0, false
+}
+
 func isLaptop() bool {
 	if runtime.GOOS == "linux" {
 		matches, _ := filepath.Glob("/sys/class/power_supply/BAT*")
@@ -326,11 +451,21 @@ func Detect() model.Specs {
 		gpuVRAM          float64
 		cpu              string
 		physical         int
+		performanceCPUs  string
+		efficiencyCPUs   string
+		performanceMask  string
+		performanceCount int
+		efficiencyCount  int
+		hybrid           bool
 	)
 	total = totalRAMGB()
-	wg.Add(6)
+	wg.Add(7)
 	go func() { defer wg.Done(); cpu = cpuName() }()
 	go func() { defer wg.Done(); physical = physicalCores() }()
+	go func() {
+		defer wg.Done()
+		performanceCPUs, efficiencyCPUs, performanceMask, performanceCount, efficiencyCount, hybrid = hybridTopology()
+	}()
 	go func() { defer wg.Done(); disk = diskFreeGB() }()
 	go func() { defer wg.Done(); laptop = isLaptop() }()
 	go func() { defer wg.Done(); gpuName, gpuVRAM = nvidiaGPU() }()
@@ -349,16 +484,22 @@ func Detect() model.Specs {
 		physical = threads
 	}
 	return model.Specs{
-		CPUName:        cpu,
-		CPUThreads:     threads,
-		PhysicalCores:  physical,
-		RAMGB:          roundTo(total, 2),
-		GPUName:        gpuName,
-		GPUVramGB:      roundTo(gpuVRAM, 2),
-		AvailableRAMGB: roundTo(available, 2),
-		DiskFreeGB:     roundTo(disk, 2),
-		UnifiedMemory:  unified,
-		IsLaptop:       laptop,
+		CPUName:            cpu,
+		CPUThreads:         threads,
+		PhysicalCores:      physical,
+		RAMGB:              roundTo(total, 2),
+		GPUName:            gpuName,
+		GPUVramGB:          roundTo(gpuVRAM, 2),
+		AvailableRAMGB:     roundTo(available, 2),
+		DiskFreeGB:         roundTo(disk, 2),
+		UnifiedMemory:      unified,
+		IsLaptop:           laptop,
+		Hybrid:             hybrid,
+		PerformanceCPUs:    performanceCPUs,
+		EfficiencyCPUs:     efficiencyCPUs,
+		PerformanceMask:    performanceMask,
+		PerformanceThreads: performanceCount,
+		EfficiencyThreads:  efficiencyCount,
 	}
 }
 

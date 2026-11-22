@@ -61,6 +61,13 @@ func commandDoctor(args []string) int {
 	if specs.PhysicalCores > 0 {
 		rows = append(rows, [2]string{"CPU cores", fmt.Sprintf("%d physical / %d logical", specs.PhysicalCores, specs.CPUThreads)})
 	}
+	if specs.Hybrid {
+		detail := fmt.Sprintf("%d performance / %d efficiency", specs.PerformanceThreads, specs.EfficiencyThreads)
+		if specs.PerformanceCPUs != "" {
+			detail += " - P CPUs " + specs.PerformanceCPUs
+		}
+		rows = append(rows, [2]string{"Hybrid CPU", detail})
+	}
 	memory := tui.FormatSize(specs.RAMGB)
 	if specs.AvailableRAMGB > 0 {
 		memory += " (" + tui.FormatSize(specs.AvailableRAMGB) + " free)"

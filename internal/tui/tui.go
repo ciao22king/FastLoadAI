@@ -16,7 +16,7 @@ import (
 )
 
 // Version is shown in the banner and by --version.
-const Version = "1.0.0"
+const Version = "1.1.0"
 
 const (
 	Reset   = "\033[0m"
@@ -235,6 +235,7 @@ func RenderBanner(modelName string, config model.Config, theme Theme, width int)
 	}
 	inner := width - 4
 	var details []string
+	var advanced []string
 	if config.OptimizationProfile != "" && config.OptimizationProfile != "auto" {
 		details = append(details, "profile "+config.OptimizationProfile)
 	}
@@ -263,8 +264,48 @@ func RenderBanner(modelName string, config model.Config, theme Theme, width int)
 	if config.FlashAttention == "on" {
 		details = append(details, "FA")
 	}
-	if config.KVCacheTypeK != "" && config.KVCacheTypeK != "f16" {
-		details = append(details, "KV "+config.KVCacheTypeK)
+	kv := config.KVCacheTypeK
+	if kv == "" {
+		kv = config.KVCacheTypeV
+	} else if config.KVCacheTypeV != "" && config.KVCacheTypeV != kv {
+		kv += "/" + config.KVCacheTypeV
+	}
+	if kv != "" && kv != "f16" {
+		details = append(details, "KV "+kv)
+	}
+	if config.KVUnified != nil {
+		if *config.KVUnified {
+			advanced = append(advanced, "KV unified")
+		} else {
+			advanced = append(advanced, "KV per-slot")
+		}
+	}
+	if config.CacheRAMMiB != nil && *config.CacheRAMMiB == 0 {
+		advanced = append(advanced, "cache off")
+	}
+	if config.SlotSavePath != "" {
+		advanced = append(advanced, "slots")
+	}
+	if config.RopeScaling != "" {
+		detail := "rope " + config.RopeScaling
+		if config.RopeScale > 0 {
+			detail += fmt.Sprintf(" x%.0f", config.RopeScale)
+		}
+		advanced = append(advanced, detail)
+	}
+	if config.CPURange != "" {
+		advanced = append(advanced, "P-cores "+config.CPURange)
+	} else if config.CPUMask != "" {
+		advanced = append(advanced, "P-cores")
+	}
+	if config.SWACheckpoints != nil && *config.SWACheckpoints > 0 {
+		advanced = append(advanced, fmt.Sprintf("SWA %d", *config.SWACheckpoints))
+	}
+	if config.NoRepack {
+		advanced = append(advanced, "no-repack")
+	}
+	if config.NoWarmup {
+		advanced = append(advanced, "no-warmup")
 	}
 	if config.MoE {
 		details = append(details, "MoE")
@@ -284,9 +325,14 @@ func RenderBanner(modelName string, config model.Config, theme Theme, width int)
 		theme.Paint("├"+strings.Repeat("─", inner)+"┤", Grey),
 		row("model   "+modelName, Bold),
 		row(fitDetails(details, inner), Dim),
+	}
+	if extra := fitDetails(advanced, inner); extra != "" {
+		lines = append(lines, row(extra, Dim))
+	}
+	lines = append(lines,
 		row("/help commands  ·  /exit quit", Dim),
 		theme.Paint("╰"+strings.Repeat("─", inner)+"╯", Grey),
-	}
+	)
 	return strings.Join(lines, "\n")
 }
 
@@ -432,6 +478,13 @@ func RenderHardware(specs model.Specs, theme Theme) string {
 	}
 	if specs.PhysicalCores > 0 {
 		rows = append(rows, [2]string{"CPU cores", strconv.Itoa(specs.PhysicalCores)})
+	}
+	if specs.Hybrid {
+		detail := fmt.Sprintf("%d performance / %d efficiency", specs.PerformanceThreads, specs.EfficiencyThreads)
+		if specs.PerformanceCPUs != "" {
+			detail += " · P CPUs " + specs.PerformanceCPUs
+		}
+		rows = append(rows, [2]string{"Hybrid CPU", detail})
 	}
 	rows = append(rows,
 		[2]string{"CPU threads", strconv.Itoa(specs.CPUThreads)},

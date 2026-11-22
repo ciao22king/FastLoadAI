@@ -67,3 +67,36 @@ func TestRecommendedThreads(t *testing.T) {
 		}
 	}
 }
+
+func TestParseAndFormatCPUList(t *testing.T) {
+	cpus := parseCPUList("0-3,8-11,11")
+	if len(cpus) != 8 {
+		t.Fatalf("parseCPUList = %v", cpus)
+	}
+	for index, want := range []int{0, 1, 2, 3, 8, 9, 10, 11} {
+		if cpus[index] != want {
+			t.Fatalf("parseCPUList[%d] = %d, want %d", index, cpus[index], want)
+		}
+	}
+	if got := formatCPUList(cpus); got != "0-3,8-11" {
+		t.Fatalf("formatCPUList = %q", got)
+	}
+}
+
+func TestCPUMask(t *testing.T) {
+	tests := []struct {
+		cpus []int
+		want string
+	}{
+		{[]int{0, 1, 2, 3, 8, 9, 10, 11}, "f0f"},
+		{[]int{0}, "1"},
+		{[]int{4}, "10"},
+		{[]int{63}, "8000000000000000"},
+		{[]int{64}, "10000000000000000"},
+	}
+	for _, item := range tests {
+		if got := cpuMask(item.cpus); got != item.want {
+			t.Fatalf("cpuMask(%v) = %q, want %q", item.cpus, got, item.want)
+		}
+	}
+}

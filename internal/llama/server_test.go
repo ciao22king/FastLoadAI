@@ -60,3 +60,45 @@ func TestBuildCommandOptimizationFlags(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildCommandExtendedOptimizationFlags(t *testing.T) {
+	unified := true
+	cache := 0
+	swaCheckpoints := 0
+	checkpointMinStep := 0
+	args := BuildCommand("llama-server", "/models/dense.gguf", model.Config{
+		CPUThreads: 8, ContextSize: 8192, NGPULayers: 0,
+		KVCacheTypeK: "q8_0", KVCacheTypeV: "q4_0",
+		KVUnified: &unified, CacheRAMMiB: &cache, SlotSavePath: "/tmp/slots",
+		SWACheckpoints: &swaCheckpoints, CheckpointMinStep: &checkpointMinStep,
+		RopeScaling: "yarn", RopeScale: 2, YarnOrigCtx: 4096,
+		CPUMask: "0f", NoRepack: true, NoWarmup: true,
+	}, 8123)
+	joined := strings.Join(args, " ")
+	for _, want := range []string{
+		"--cache-type-k q8_0", "--cache-type-v q4_0", "--kv-unified",
+		"--cache-ram 0", "--no-cache-idle-slots", "--slot-save-path /tmp/slots",
+		"--swa-checkpoints 0", "--checkpoint-min-step 0",
+		"--rope-scaling yarn", "--rope-scale 2", "--yarn-orig-ctx 4096",
+		"--cpu-mask 0f", "--no-repack", "--no-warmup",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("args %q missing %q", joined, want)
+		}
+	}
+}
+
+func TestBuildCommandNoKVUnifiedAndCPURange(t *testing.T) {
+	unified := false
+	args := BuildCommand("llama-server", "/models/dense.gguf", model.Config{
+		CPUThreads: 8, ContextSize: 4096, KVUnified: &unified, CPURange: "0-7",
+		CPUMask: "ff",
+	}, 8123)
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "--no-kv-unified") {
+		t.Errorf("args %q missing --no-kv-unified", joined)
+	}
+	if !strings.Contains(joined, "--cpu-range 0-7") || strings.Contains(joined, "--cpu-mask") {
+		t.Errorf("args %q should prefer --cpu-range", joined)
+	}
+}

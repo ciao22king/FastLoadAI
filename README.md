@@ -16,7 +16,8 @@ runs locally: no prompt or model data leaves the machine.
 - One-command download and chat: `fastloadai run qwen2.5-0.5b`.
 - Automatic optimization profiles: `auto`, `speed`, `balanced`, `memory` and `quality`.
 - MoE-aware CPU expert offload, GPU expert cache and tensor placement overrides.
-- Flash Attention, quantized KV cache, KV reuse, context shift and SWA cache.
+- Flash Attention, split K/V cache quantization, unified KV, prompt-cache RAM limits and slot persistence.
+- RoPE scaling/YaRN, SWA checkpoints, CPU affinity for hybrid P/E-core CPUs and startup tuning.
 - Speculative decoding with ngram lookup or a separate draft model.
 - Batch/ubatch, parallel slots, thread-batch, NUMA, GPU split and priority tuning.
 - Full-screen chat UI with streaming, scrollback, input history and a status bar.
@@ -92,6 +93,10 @@ fastloadai models --json
 fastloadai plan ./model.gguf --output config.json
 fastloadai optimize qwen2.5-0.5b --profile speed
 fastloadai optimize ./model.gguf --profile memory --kv-cache q4_0
+fastloadai optimize ./model.gguf --kv-cache-k q8_0 --kv-cache-v f16 --cache-ram 2048
+fastloadai optimize ./model.gguf --rope-scaling yarn --rope-scale 2 --yarn-orig-ctx 32768
+fastloadai optimize ./model.gguf --swa-checkpoints 8 --checkpoint-min-step 2048
+fastloadai optimize ./model.gguf --cpu-range 0-7 --no-repack --no-warmup
 fastloadai doctor
 fastloadai run
 fastloadai run qwen2.5-0.5b
@@ -150,7 +155,10 @@ path. If the model is missing, it downloads the best fit first, then starts
 - `--temperature`, `--max-tokens` and `--system` tune generation.
 - `--low-memory` forces a small context and small batches.
 - `--profile auto|speed|balanced|memory|quality` selects an optimization plan.
-- `--flash-attn`, `--kv-cache`, `--speculative` and `--draft-model` tune inference.
+- `--flash-attn`, `--kv-cache`, `--kv-cache-k`, `--kv-cache-v`, `--speculative` and `--draft-model` tune inference.
+- `--kv-unified`/`--no-kv-unified`, `--cache-ram`, `--slot-save-path` tune the KV and prompt cache.
+- `--rope-scaling`, `--rope-scale`, `--yarn-orig-ctx`, `--swa-checkpoints` and `--checkpoint-min-step` extend context and checkpointing.
+- `--cpu-mask`/`--cpu-range`, `--no-repack` and `--no-warmup` tune CPU affinity and startup.
 - `--cpu-moe`, `--n-cpu-moe`, `--moe-cache-mib` and `--override-tensor` tune MoE.
 - `--batch-size`, `--ubatch-size`, `--threads-batch`, `--parallel` and `--no-cont-batching` tune batching.
 - `--load-mode`, `--mlock`, `--no-mmap`, `--lazy-mode`, `--no-kv-offload` tune memory.
@@ -222,9 +230,9 @@ the config unless a flag overrides it.
 | Profile | Goal | Typical choices |
 | --- | --- | --- |
 | `auto` | Pick from the hardware and model fit | `balanced`, or `memory` when RAM is tight |
-| `speed` | Fastest short answers | Flash Attention on, F16 KV, large batches, KV reuse, context shift |
+| `speed` | Fastest short answers | Flash Attention on, F16 KV, large batches, KV reuse, context shift, no warmup |
 | `balanced` | Good default | Flash Attention auto, Q8_0 KV for 8K+ context, KV reuse |
-| `memory` | Smallest RAM/VRAM footprint | Q4_0 KV, 128-token batches, half the batch threads, no KV offload |
+| `memory` | Smallest RAM/VRAM footprint | Q4_0 KV, 128-token batches, half the batch threads, no KV offload, prompt cache off, no repack |
 | `quality` | Least numerical loss | F16 KV, no speculative decoding, conservative batching |
 
 The optimization layer covers these techniques:
@@ -243,9 +251,27 @@ The optimization layer covers these techniques:
   kernel. It is on for `speed` and `memory`, and automatic for `balanced` and
   `quality`.
 - **KV cache quantization.** `--kv-cache` sets both `--cache-type-k` and
-  `--cache-type-v`. Common values are `f16`, `bf16`, `q8_0`, `q5_1`, `q4_0`
-  and `iq4_nl`; support depends on the llama.cpp build. Q8_0 is a small quality
-  loss for a large memory saving; Q4_0 is the memory-profile choice.
+  `--cache-type-v`. Use `--kv-cache-k` and `--kv-cache-v` independently, for
+  example `--kv-cache-k q8_0 --kv-cache-v f16` to save memory on keys while
+  keeping values at full precision. Common values are `f16`, `bf16`, `q8_0`,
+  `q5_1`, `q4_0` and `iq4_nl`; support depends on the llama.cpp build.
+- **KV buffer and prompt cache.** `--kv-unified` shares one KV buffer across
+  slots (`-kvu`), while `--no-kv-unified` keeps one buffer per slot.
+  `--cache-ram` limits the in-RAM prompt cache in MiB (`-1` unlimited, `0`
+  disabled); the memory profile and `--low-memory` disable it. `--slot-save-path`
+  persists slot KV state between sessions.
+- **Context extension.** `--rope-scaling none|linear|yarn`, `--rope-scale N`
+  and `--yarn-orig-ctx N` extend the context beyond the GGUF training size.
+  `--swa-checkpoints N` sets context/SWA checkpoints per slot, and
+  `--checkpoint-min-step N` sets their minimum spacing (`0` = no minimum).
+- **CPU affinity and startup.** On hybrid Intel CPUs (and Apple Silicon for
+  reporting), FastLoadAI detects performance and efficiency cores. The
+  `speed`, `balanced` and `quality` profiles pin llama.cpp to the performance
+  cores with `--cpu-mask` and cap batch threads to their count. Override with
+  `--cpu-mask` or `--cpu-range`. `--no-repack` disables runtime weight repacking
+  when RAM is tight; `--no-warmup` skips the empty startup run and is automatic
+  in the `speed` profile and with `--once`. Use `--repack` or `--warmup` to
+  force the opposite when a saved config disabled them.
 - **Speculative decoding.** `--speculative` enables ngram lookup decoding with
   no draft model. `--draft-model` loads a smaller draft GGUF and enables
   `draft-simple`. `--spec-type` selects any llama.cpp type, including
@@ -273,8 +299,9 @@ The optimization layer covers these techniques:
 
 Only flags that differ from llama.cpp defaults are written to the command line.
 For example, F16 KV cache and `--flash-attn auto` are omitted, while
-`--flash-attn on`, `--cache-type-k q8_0`, `--cpu-moe` and `--spec-type
-ngram-simple` are passed.
+`--flash-attn on`, `--cache-type-k q8_0`, `--kv-unified`, `--cache-ram 0`,
+`--cpu-moe` and `--spec-type ngram-simple` are passed. Explicit `0` values for
+`--cache-ram`, `--swa-checkpoints` and `--checkpoint-min-step` are preserved.
 
 ## Docker
 
@@ -327,9 +354,13 @@ the official `llama.cpp` b12613 build:
 | Qwen2.5-0.5B-Instruct | Q4_K_M | 8192 | ~4-5 tok/s (short reply) |
 | Qwen2.5-0.5B-Instruct, `speed` profile | Q4_K_M | 8192 | Flash Attention + KV reuse |
 | Qwen2.5-0.5B-Instruct, `balanced` profile | Q4_K_M | 8192 | Q8_0 KV cache |
-| Qwen2.5-0.5B-Instruct, `memory` profile | Q4_K_M | 4096 | Q4_0 KV cache, 128-token batches |
+| Qwen2.5-0.5B-Instruct, `memory` profile | Q4_K_M | 4096 | Q4_0 KV cache, 128-token batches, prompt cache off, no repack |
 | Qwen2.5-0.5B-Instruct, ngram speculative | Q4_K_M | 8192 | `--spec-type ngram-simple` |
 | Qwen2.5-0.5B-Instruct, draft model | Q4_K_M | 8192 | same file as draft, `draft-simple` |
+| Qwen2.5-0.5B-Instruct, split KV | Q4_K_M | 8192 | K `q8_0`, V `f16`, unified KV, 2 GiB prompt cache |
+| Qwen2.5-0.5B-Instruct, per-slot KV | Q4_K_M | 8192 | `--parallel 2`, `--no-kv-unified`, 512 MiB prompt cache |
+| Qwen2.5-0.5B-Instruct, RoPE/SWA | Q4_K_M | 8192 | `--rope-scaling yarn --rope-scale 2`, SWA checkpoints 8/2048 |
+| Qwen2.5-0.5B-Instruct, startup flags | Q4_K_M | 8192 | `--no-repack`, `--no-warmup`, `--cpu-range 0-3` |
 
 Speeds are short-generation estimates and vary with prompt length, threads and
 CPU. The optimization runs above were verified with the real Qwen2.5-0.5B GGUF

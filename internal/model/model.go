@@ -19,6 +19,14 @@ type Specs struct {
 	DiskFreeGB     float64 `json:"disk_free_gb"`
 	UnifiedMemory  bool    `json:"unified_memory"`
 	IsLaptop       bool    `json:"is_laptop"`
+
+	// Hybrid CPU topology (Intel P-core/E-core, Apple performance/efficiency).
+	Hybrid             bool   `json:"hybrid,omitempty"`
+	PerformanceCPUs    string `json:"performance_cpus,omitempty"`
+	EfficiencyCPUs     string `json:"efficiency_cpus,omitempty"`
+	PerformanceMask    string `json:"performance_mask,omitempty"`
+	PerformanceThreads int    `json:"performance_threads,omitempty"`
+	EfficiencyThreads  int    `json:"efficiency_threads,omitempty"`
 }
 
 // Config is the persisted runtime plan for llama.cpp.
@@ -47,6 +55,9 @@ type Config struct {
 	FlashAttention      string  `json:"flash_attention,omitempty"`
 	KVCacheTypeK        string  `json:"kv_cache_type_k,omitempty"`
 	KVCacheTypeV        string  `json:"kv_cache_type_v,omitempty"`
+	KVUnified           *bool   `json:"kv_unified,omitempty"`
+	CacheRAMMiB         *int    `json:"cache_ram_mib,omitempty"`
+	SlotSavePath        string  `json:"slot_save_path,omitempty"`
 	LoadMode            string  `json:"load_mode,omitempty"`
 	LazyMode            string  `json:"lazy_mode,omitempty"`
 	NoKVOffload         bool    `json:"no_kv_offload,omitempty"`
@@ -73,6 +84,15 @@ type Config struct {
 	CacheReuse          int     `json:"cache_reuse,omitempty"`
 	ContextShift        bool    `json:"context_shift,omitempty"`
 	SWAFull             bool    `json:"swa_full,omitempty"`
+	SWACheckpoints      *int    `json:"swa_checkpoints,omitempty"`
+	CheckpointMinStep   *int    `json:"checkpoint_min_step,omitempty"`
+	RopeScaling         string  `json:"rope_scaling,omitempty"`
+	RopeScale           float64 `json:"rope_scale,omitempty"`
+	YarnOrigCtx         int     `json:"yarn_orig_ctx,omitempty"`
+	CPUMask             string  `json:"cpu_mask,omitempty"`
+	CPURange            string  `json:"cpu_range,omitempty"`
+	NoRepack            bool    `json:"no_repack,omitempty"`
+	NoWarmup            bool    `json:"no_warmup,omitempty"`
 	Priority            int     `json:"priority,omitempty"`
 	Poll                int     `json:"poll,omitempty"`
 }

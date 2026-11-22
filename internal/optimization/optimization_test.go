@@ -24,6 +24,7 @@ func autoOptions() Options {
 	return Options{
 		NCPUMoE: -1, MoECacheMiB: -1, MoECacheCPUShare: -1,
 		CacheReuse: -1, Priority: -999, Poll: -1,
+		SWACheckpoints: -1, CheckpointMinStep: -1,
 		DraftMax: -1, DraftMin: -1, DraftPMin: -1, DraftGPULayers: -1,
 	}
 }
@@ -171,6 +172,7 @@ func TestInherit(t *testing.T) {
 	saved := model.Config{
 		OptimizationProfile: "memory", FlashAttention: "on", KVCacheTypeK: "q4_0",
 		LoadMode: "mmap", SpecType: "ngram-simple", CacheReuse: 64,
+		ContextSize: 4096, CPUThreads: 6, NGPULayers: 12,
 	}
 	cfg := Inherit(baseConfig(), saved)
 	if cfg.OptimizationProfile != "memory" || cfg.FlashAttention != "on" || cfg.KVCacheTypeK != "q4_0" {
@@ -178,6 +180,9 @@ func TestInherit(t *testing.T) {
 	}
 	if cfg.SpecType != "ngram-simple" || cfg.CacheReuse != 64 {
 		t.Fatalf("spec/cache inherit failed: %+v", cfg)
+	}
+	if cfg.ContextSize != 4096 || cfg.CPUThreads != 6 || cfg.NGPULayers != 12 {
+		t.Fatalf("runtime sizing not inherited: %+v", cfg)
 	}
 }
 
@@ -248,4 +253,196 @@ func TestExplicitDraftMaxZero(t *testing.T) {
 	if cfg.DraftMax != 0 {
 		t.Fatalf("explicit --draft-max 0 was lost: %+v", cfg)
 	}
+}
+
+func TestSplitKVCacheAndPromptCache(t *testing.T) {
+	cache := 0
+	unified := true
+	opts := autoOptions()
+	opts.Profile = "balanced"
+	opts.KVCacheType = "q8_0"
+	opts.KVCacheTypeK = "q8_0"
+	opts.KVCacheTypeV = "f16"
+	opts.CacheRAMMiB = &cache
+	opts.KVUnified = &unified
+	opts.SlotSavePath = "/tmp/slots"
+	cfg := Apply(baseConfig(), "/models/dense.gguf", "", opts)
+	if cfg.KVCacheTypeK != "q8_0" || cfg.KVCacheTypeV != "f16" {
+		t.Fatalf("split KV cache = %s/%s", cfg.KVCacheTypeK, cfg.KVCacheTypeV)
+	}
+	if cfg.CacheRAMMiB == nil || *cfg.CacheRAMMiB != 0 {
+		t.Fatalf("prompt cache RAM = %v, want 0", cfg.CacheRAMMiB)
+	}
+	if cfg.KVUnified == nil || !*cfg.KVUnified {
+		t.Fatalf("unified KV = %v, want true", cfg.KVUnified)
+	}
+	if cfg.SlotSavePath != "/tmp/slots" {
+		t.Fatalf("slot save path = %q", cfg.SlotSavePath)
+	}
+}
+
+func TestMemoryProfileDisablesPromptCacheAndRepack(t *testing.T) {
+	opts := autoOptions()
+	opts.Profile = "memory"
+	cfg := Apply(baseConfig(), "/models/dense.gguf", "", opts)
+	if cfg.CacheRAMMiB == nil || *cfg.CacheRAMMiB != 0 {
+		t.Fatalf("memory profile prompt cache = %v, want 0", cfg.CacheRAMMiB)
+	}
+	if !cfg.NoRepack {
+		t.Fatal("memory profile should disable weight repacking")
+	}
+}
+
+func TestLowMemoryHintsApplyOutsideMemoryProfile(t *testing.T) {
+	cfg := baseConfig()
+	cfg.LowMemory = true
+	opts := autoOptions()
+	opts.Profile = "balanced"
+	cfg = Apply(cfg, "/models/dense.gguf", "", opts)
+	if cfg.CacheRAMMiB == nil || *cfg.CacheRAMMiB != 0 {
+		t.Fatalf("low memory prompt cache = %v, want 0", cfg.CacheRAMMiB)
+	}
+	if !cfg.NoRepack {
+		t.Fatal("low memory should disable weight repacking")
+	}
+}
+
+func TestSpeedProfileSkipsWarmup(t *testing.T) {
+	opts := autoOptions()
+	opts.Profile = "speed"
+	cfg := Apply(baseConfig(), "/models/dense.gguf", "", opts)
+	if !cfg.NoWarmup {
+		t.Fatal("speed profile should skip warmup")
+	}
+}
+
+func TestHybridCPUPinsPerformanceCores(t *testing.T) {
+	cfg := baseConfig()
+	cfg.CPUThreads = 16
+	cfg.ThreadsBatch = 16
+	cfg.Hardware.Hybrid = true
+	cfg.Hardware.PerformanceMask = "ff"
+	cfg.Hardware.PerformanceThreads = 8
+	opts := autoOptions()
+	opts.Profile = "balanced"
+	cfg = Apply(cfg, "/models/dense.gguf", "", opts)
+	if cfg.CPUMask != "ff" {
+		t.Fatalf("CPU mask = %q, want ff", cfg.CPUMask)
+	}
+	if cfg.CPUThreads != 8 || cfg.ThreadsBatch != 8 {
+		t.Fatalf("threads = %d/%d, want 8/8", cfg.CPUThreads, cfg.ThreadsBatch)
+	}
+}
+
+func TestMemoryProfileDoesNotPinPerformanceCores(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Hardware.Hybrid = true
+	cfg.Hardware.PerformanceMask = "ff"
+	cfg.Hardware.PerformanceThreads = 8
+	opts := autoOptions()
+	opts.Profile = "memory"
+	cfg = Apply(cfg, "/models/dense.gguf", "", opts)
+	if cfg.CPUMask != "" {
+		t.Fatalf("memory profile should not pin CPUs: %+v", cfg)
+	}
+}
+
+func TestRopeSWAAndAffinityOverrides(t *testing.T) {
+	mask := "0f"
+	noRepack := true
+	noWarmup := true
+	opts := autoOptions()
+	opts.Profile = "balanced"
+	opts.RopeScaling = "yarn"
+	opts.RopeScale = 2
+	opts.YarnOrigCtx = 4096
+	opts.SWACheckpoints = 0
+	opts.CheckpointMinStep = 0
+	opts.CPUMask = mask
+	opts.NoRepack = &noRepack
+	opts.NoWarmup = &noWarmup
+	cfg := Apply(baseConfig(), "/models/dense.gguf", "", opts)
+	if cfg.RopeScaling != "yarn" || cfg.RopeScale != 2 || cfg.YarnOrigCtx != 4096 {
+		t.Fatalf("rope overrides failed: %+v", cfg)
+	}
+	if cfg.SWACheckpoints == nil || *cfg.SWACheckpoints != 0 || cfg.CheckpointMinStep == nil || *cfg.CheckpointMinStep != 0 {
+		t.Fatalf("checkpoint overrides failed: %+v", cfg)
+	}
+	if cfg.CPUMask != mask || !cfg.NoRepack || !cfg.NoWarmup {
+		t.Fatalf("affinity/startup overrides failed: %+v", cfg)
+	}
+}
+
+func TestInheritNewOptimizationFields(t *testing.T) {
+	cache := 0
+	unified := false
+	noRepack := true
+	noWarmup := true
+	saved := model.Config{
+		OptimizationProfile: "balanced", SlotSavePath: "/tmp/slots",
+		RopeScaling: "linear", RopeScale: 4, YarnOrigCtx: 2048,
+		SWACheckpoints: intPointer(0), CheckpointMinStep: intPointer(0), CPUMask: "0f",
+		CacheRAMMiB: &cache, KVUnified: &unified, NoRepack: noRepack, NoWarmup: noWarmup,
+	}
+	cfg := Inherit(baseConfig(), saved)
+	if cfg.SlotSavePath != "/tmp/slots" || cfg.RopeScaling != "linear" || cfg.RopeScale != 4 || cfg.YarnOrigCtx != 2048 {
+		t.Fatalf("new string fields not inherited: %+v", cfg)
+	}
+	if cfg.SWACheckpoints == nil || *cfg.SWACheckpoints != 0 || cfg.CheckpointMinStep == nil || *cfg.CheckpointMinStep != 0 || cfg.CPUMask != "0f" {
+		t.Fatalf("new int fields not inherited: %+v", cfg)
+	}
+	if cfg.CacheRAMMiB == nil || *cfg.CacheRAMMiB != 0 || cfg.KVUnified == nil || *cfg.KVUnified {
+		t.Fatalf("new pointer fields not inherited: %+v", cfg)
+	}
+	if !cfg.NoRepack || !cfg.NoWarmup {
+		t.Fatalf("new bool fields not inherited: %+v", cfg)
+	}
+}
+
+func TestSummaryRowsIncludeNewControls(t *testing.T) {
+	cache := 0
+	unified := true
+	opts := autoOptions()
+	opts.Profile = "balanced"
+	opts.CacheRAMMiB = &cache
+	opts.KVUnified = &unified
+	opts.SlotSavePath = "/tmp/slots"
+	opts.SWACheckpoints = 0
+	opts.CheckpointMinStep = 0
+	opts.RopeScaling = "yarn"
+	opts.RopeScale = 2
+	opts.YarnOrigCtx = 4096
+	opts.CPUMask = "0f"
+	opts.NoRepack = boolPointer(true)
+	opts.NoWarmup = boolPointer(true)
+	cfg := Apply(baseConfig(), "/models/dense.gguf", "", opts)
+	rows := SummaryRows(cfg)
+	wanted := map[string]string{
+		"KV buffer":          "unified",
+		"Prompt cache RAM":   "off",
+		"Slot save path":     "/tmp/slots",
+		"SWA checkpoints":    "off",
+		"Checkpoint spacing": "no minimum",
+		"CPU affinity":       "mask 0f",
+		"Weight repack":      "off",
+		"Warmup":             "off",
+	}
+	found := map[string]bool{}
+	for _, row := range rows {
+		if want, ok := wanted[row[0]]; ok {
+			found[row[0]] = true
+			if row[1] != want {
+				t.Fatalf("%s = %q, want %q", row[0], row[1], want)
+			}
+		}
+	}
+	for key := range wanted {
+		if !found[key] {
+			t.Fatalf("summary missing %q: %#v", key, rows)
+		}
+	}
+}
+
+func boolPointer(value bool) *bool {
+	return &value
 }

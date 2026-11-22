@@ -57,6 +57,24 @@ func BuildCommand(executable, modelPath string, config model.Config, port int) [
 	if config.KVCacheTypeV != "" && config.KVCacheTypeV != "f16" {
 		args = append(args, "--cache-type-v", config.KVCacheTypeV)
 	}
+	if config.KVUnified != nil {
+		if *config.KVUnified {
+			args = append(args, "--kv-unified")
+		} else {
+			args = append(args, "--no-kv-unified")
+		}
+	}
+	if config.CacheRAMMiB != nil {
+		args = append(args, "--cache-ram", strconv.Itoa(*config.CacheRAMMiB))
+		if *config.CacheRAMMiB == 0 {
+			// llama.cpp keeps idle slots in the prompt cache by default; that
+			// feature cannot work when the prompt cache is disabled.
+			args = append(args, "--no-cache-idle-slots")
+		}
+	}
+	if config.SlotSavePath != "" {
+		args = append(args, "--slot-save-path", config.SlotSavePath)
+	}
 	loadMode := config.LoadMode
 	if loadMode == "" && !config.Mmap {
 		loadMode = "none"
@@ -99,6 +117,32 @@ func BuildCommand(executable, modelPath string, config model.Config, port int) [
 	}
 	if config.SWAFull {
 		args = append(args, "--swa-full")
+	}
+	if config.SWACheckpoints != nil {
+		args = append(args, "--swa-checkpoints", strconv.Itoa(*config.SWACheckpoints))
+	}
+	if config.CheckpointMinStep != nil {
+		args = append(args, "--checkpoint-min-step", strconv.Itoa(*config.CheckpointMinStep))
+	}
+	if config.RopeScaling != "" {
+		args = append(args, "--rope-scaling", config.RopeScaling)
+	}
+	if config.RopeScale > 0 {
+		args = append(args, "--rope-scale", strconv.FormatFloat(config.RopeScale, 'f', -1, 64))
+	}
+	if config.YarnOrigCtx > 0 {
+		args = append(args, "--yarn-orig-ctx", strconv.Itoa(config.YarnOrigCtx))
+	}
+	if config.CPURange != "" {
+		args = append(args, "--cpu-range", config.CPURange)
+	} else if config.CPUMask != "" {
+		args = append(args, "--cpu-mask", config.CPUMask)
+	}
+	if config.NoRepack {
+		args = append(args, "--no-repack")
+	}
+	if config.NoWarmup {
+		args = append(args, "--no-warmup")
 	}
 	if config.NumA != "" {
 		args = append(args, "--numa", config.NumA)

@@ -46,40 +46,54 @@ func ParseProfile(value string) (Profile, error) {
 
 // Options overrides the automatic choices. Negative sentinels mean "auto".
 type Options struct {
-	Profile          string
-	FlashAttention   string
-	KVCacheType      string
-	NoKVOffload      bool
-	NoOpOffload      bool
-	LoadMode         string
-	LazyMode         string
-	NoMmap           bool
-	Mlock            *bool
-	BatchSize        int
-	UBatchSize       int
-	ThreadsBatch     int
-	NoContBatching   bool
-	Parallel         int
-	NumA             string
-	SplitMode        string
-	TensorSplit      string
-	CPUMoE           *bool
-	NCPUMoE          int
-	MoECacheMiB      int
-	MoECacheCPUShare float64
-	OverrideTensor   string
-	Speculative      bool
-	SpecType         string
-	DraftModel       string
-	DraftMax         int
-	DraftMin         int
-	DraftPMin        float64
-	DraftGPULayers   int
-	CacheReuse       int
-	ContextShift     *bool
-	SWAFull          bool
-	Priority         int
-	Poll             int
+	Profile           string
+	FlashAttention    string
+	KVCacheType       string
+	KVCacheTypeK      string
+	KVCacheTypeV      string
+	KVUnified         *bool
+	CacheRAMMiB       *int
+	SlotSavePath      string
+	NoKVOffload       bool
+	NoOpOffload       bool
+	LoadMode          string
+	LazyMode          string
+	NoMmap            bool
+	Mlock             *bool
+	BatchSize         int
+	UBatchSize        int
+	ThreadsBatch      int
+	NoContBatching    bool
+	Parallel          int
+	NumA              string
+	SplitMode         string
+	TensorSplit       string
+	CPUMoE            *bool
+	NCPUMoE           int
+	MoECacheMiB       int
+	MoECacheCPUShare  float64
+	OverrideTensor    string
+	Speculative       bool
+	SpecType          string
+	DraftModel        string
+	DraftMax          int
+	DraftMin          int
+	DraftPMin         float64
+	DraftGPULayers    int
+	CacheReuse        int
+	ContextShift      *bool
+	SWAFull           bool
+	SWACheckpoints    int
+	CheckpointMinStep int
+	RopeScaling       string
+	RopeScale         float64
+	YarnOrigCtx       int
+	CPUMask           string
+	CPURange          string
+	NoRepack          *bool
+	NoWarmup          *bool
+	Priority          int
+	Poll              int
 }
 
 // Apply fills a runtime config with the best-known llama.cpp optimizations.
@@ -101,6 +115,8 @@ func Apply(cfg model.Config, modelPath, repo string, opts Options) model.Config 
 	cfg.MoE = DetectMoE(modelPath, repo, cfg.ModelRepo, cfg.QuantizationFile)
 	applyDefaults(&cfg)
 	applyProfile(&cfg, profile)
+	applyMemoryHints(&cfg)
+	applyCPUAffinity(&cfg, profile)
 	applyMoE(&cfg, profile)
 	applySpeculative(&cfg, opts)
 	applyOverrides(&cfg, opts)
@@ -125,6 +141,9 @@ func applyDefaults(cfg *model.Config) {
 	cfg.FlashAttention = "auto"
 	cfg.KVCacheTypeK = "f16"
 	cfg.KVCacheTypeV = "f16"
+	cfg.KVUnified = nil
+	cfg.CacheRAMMiB = nil
+	cfg.SlotSavePath = ""
 	cfg.LoadMode = "mmap"
 	if !cfg.Mmap {
 		cfg.LoadMode = "none"
@@ -154,6 +173,15 @@ func applyDefaults(cfg *model.Config) {
 	cfg.CacheReuse = 256
 	cfg.ContextShift = false
 	cfg.SWAFull = false
+	cfg.SWACheckpoints = nil
+	cfg.CheckpointMinStep = nil
+	cfg.RopeScaling = ""
+	cfg.RopeScale = 0
+	cfg.YarnOrigCtx = 0
+	cfg.CPUMask = ""
+	cfg.CPURange = ""
+	cfg.NoRepack = false
+	cfg.NoWarmup = false
 	cfg.Priority = 0
 	cfg.Poll = 50
 }
@@ -167,6 +195,7 @@ func applyProfile(cfg *model.Config, profile Profile) {
 		cfg.ThreadsBatch = max(1, cfg.CPUThreads)
 		cfg.CacheReuse = 256
 		cfg.ContextShift = cfg.ContextSize >= 8192
+		cfg.NoWarmup = true
 	case ProfileMemory:
 		cfg.FlashAttention = "on"
 		cfg.KVCacheTypeK = "q4_0"
@@ -176,6 +205,8 @@ func applyProfile(cfg *model.Config, profile Profile) {
 		cfg.ThreadsBatch = max(1, cfg.CPUThreads/2)
 		cfg.CacheReuse = 0
 		cfg.ContextShift = true
+		cfg.CacheRAMMiB = intPointer(0)
+		cfg.NoRepack = true
 		if cfg.ContextSize > 4096 {
 			cfg.ContextSize = 4096
 		}
@@ -203,6 +234,37 @@ func applyProfile(cfg *model.Config, profile Profile) {
 		cfg.CacheReuse = 256
 		cfg.ContextShift = cfg.ContextSize >= 8192
 	}
+}
+
+func applyMemoryHints(cfg *model.Config) {
+	if !cfg.LowMemory {
+		return
+	}
+	if cfg.CacheRAMMiB == nil {
+		cfg.CacheRAMMiB = intPointer(0)
+	}
+	cfg.NoRepack = true
+}
+
+func applyCPUAffinity(cfg *model.Config, profile Profile) {
+	if profile == ProfileMemory || !cfg.Hardware.Hybrid {
+		return
+	}
+	if cfg.CPUMask != "" || cfg.CPURange != "" {
+		return
+	}
+	if cfg.Hardware.PerformanceMask == "" {
+		return
+	}
+	cfg.CPUMask = cfg.Hardware.PerformanceMask
+	if cfg.Hardware.PerformanceThreads > 0 {
+		cfg.CPUThreads = clamp(cfg.CPUThreads, 1, cfg.Hardware.PerformanceThreads)
+		cfg.ThreadsBatch = clamp(cfg.ThreadsBatch, 1, cfg.CPUThreads)
+	}
+}
+
+func intPointer(value int) *int {
+	return &value
 }
 
 func applyMoE(cfg *model.Config, profile Profile) {
@@ -269,6 +331,23 @@ func applyOverrides(cfg *model.Config, opts Options) {
 	if opts.KVCacheType != "" {
 		cfg.KVCacheTypeK = opts.KVCacheType
 		cfg.KVCacheTypeV = opts.KVCacheType
+	}
+	if opts.KVCacheTypeK != "" {
+		cfg.KVCacheTypeK = opts.KVCacheTypeK
+	}
+	if opts.KVCacheTypeV != "" {
+		cfg.KVCacheTypeV = opts.KVCacheTypeV
+	}
+	if opts.KVUnified != nil {
+		value := *opts.KVUnified
+		cfg.KVUnified = &value
+	}
+	if opts.CacheRAMMiB != nil {
+		value := *opts.CacheRAMMiB
+		cfg.CacheRAMMiB = &value
+	}
+	if opts.SlotSavePath != "" {
+		cfg.SlotSavePath = opts.SlotSavePath
 	}
 	if opts.NoKVOffload {
 		cfg.NoKVOffload = true
@@ -366,6 +445,35 @@ func applyOverrides(cfg *model.Config, opts Options) {
 	if opts.SWAFull {
 		cfg.SWAFull = true
 	}
+	if opts.SWACheckpoints >= 0 {
+		value := opts.SWACheckpoints
+		cfg.SWACheckpoints = &value
+	}
+	if opts.CheckpointMinStep >= 0 {
+		value := opts.CheckpointMinStep
+		cfg.CheckpointMinStep = &value
+	}
+	if opts.RopeScaling != "" {
+		cfg.RopeScaling = opts.RopeScaling
+	}
+	if opts.RopeScale > 0 {
+		cfg.RopeScale = opts.RopeScale
+	}
+	if opts.YarnOrigCtx > 0 {
+		cfg.YarnOrigCtx = opts.YarnOrigCtx
+	}
+	if opts.CPUMask != "" {
+		cfg.CPUMask = opts.CPUMask
+	}
+	if opts.CPURange != "" {
+		cfg.CPURange = opts.CPURange
+	}
+	if opts.NoRepack != nil {
+		cfg.NoRepack = *opts.NoRepack
+	}
+	if opts.NoWarmup != nil {
+		cfg.NoWarmup = *opts.NoWarmup
+	}
 	if opts.Priority > -999 {
 		cfg.Priority = opts.Priority
 	}
@@ -379,6 +487,15 @@ func Inherit(dst model.Config, saved model.Config) model.Config {
 	if saved.OptimizationProfile != "" {
 		dst.OptimizationProfile = saved.OptimizationProfile
 	}
+	// Runtime sizing is part of the saved plan: the memory profile, for
+	// example, caps context below the hardware recommendation.
+	if saved.ContextSize > 0 {
+		dst.ContextSize = saved.ContextSize
+	}
+	if saved.CPUThreads > 0 {
+		dst.CPUThreads = saved.CPUThreads
+	}
+	dst.NGPULayers = saved.NGPULayers
 	for _, value := range []struct {
 		dst *string
 		src string
@@ -394,6 +511,10 @@ func Inherit(dst model.Config, saved model.Config) model.Config {
 		{&dst.OverrideTensor, saved.OverrideTensor},
 		{&dst.SpecType, saved.SpecType},
 		{&dst.DraftModel, saved.DraftModel},
+		{&dst.SlotSavePath, saved.SlotSavePath},
+		{&dst.RopeScaling, saved.RopeScaling},
+		{&dst.CPUMask, saved.CPUMask},
+		{&dst.CPURange, saved.CPURange},
 	} {
 		if value.src != "" {
 			*value.dst = value.src
@@ -413,6 +534,7 @@ func Inherit(dst model.Config, saved model.Config) model.Config {
 		{&dst.DraftMin, saved.DraftMin},
 		{&dst.DraftGPULayers, saved.DraftGPULayers},
 		{&dst.CacheReuse, saved.CacheReuse},
+		{&dst.YarnOrigCtx, saved.YarnOrigCtx},
 		{&dst.Priority, saved.Priority},
 		{&dst.Poll, saved.Poll},
 	} {
@@ -422,6 +544,25 @@ func Inherit(dst model.Config, saved model.Config) model.Config {
 	}
 	if saved.MoECacheCPUShare > 0 {
 		dst.MoECacheCPUShare = saved.MoECacheCPUShare
+	}
+	if saved.RopeScale > 0 {
+		dst.RopeScale = saved.RopeScale
+	}
+	if saved.SWACheckpoints != nil {
+		value := *saved.SWACheckpoints
+		dst.SWACheckpoints = &value
+	}
+	if saved.CheckpointMinStep != nil {
+		value := *saved.CheckpointMinStep
+		dst.CheckpointMinStep = &value
+	}
+	if saved.KVUnified != nil {
+		value := *saved.KVUnified
+		dst.KVUnified = &value
+	}
+	if saved.CacheRAMMiB != nil {
+		value := *saved.CacheRAMMiB
+		dst.CacheRAMMiB = &value
 	}
 	if saved.DraftModel != "" {
 		dst.DraftMax = saved.DraftMax
@@ -435,6 +576,8 @@ func Inherit(dst model.Config, saved model.Config) model.Config {
 	dst.CPUMoE = dst.CPUMoE || saved.CPUMoE
 	dst.ContextShift = dst.ContextShift || saved.ContextShift
 	dst.SWAFull = dst.SWAFull || saved.SWAFull
+	dst.NoRepack = dst.NoRepack || saved.NoRepack
+	dst.NoWarmup = dst.NoWarmup || saved.NoWarmup
 	dst.MoE = dst.MoE || saved.MoE
 	if saved.LoadMode == "" && !saved.Mmap {
 		dst.LoadMode = "none"
@@ -518,6 +661,26 @@ func SummaryRows(cfg model.Config) [][2]string {
 		{"Thread tuning", threadTuning},
 		{"Load mode", fallback(cfg.LoadMode, "mmap")},
 	}
+	if cfg.KVUnified != nil {
+		value := "per-slot"
+		if *cfg.KVUnified {
+			value = "unified"
+		}
+		rows = append(rows, [2]string{"KV buffer", value})
+	}
+	if cfg.CacheRAMMiB != nil {
+		value := fmt.Sprintf("%d MiB", *cfg.CacheRAMMiB)
+		switch *cfg.CacheRAMMiB {
+		case 0:
+			value = "off"
+		case -1:
+			value = "unlimited"
+		}
+		rows = append(rows, [2]string{"Prompt cache RAM", value})
+	}
+	if cfg.SlotSavePath != "" {
+		rows = append(rows, [2]string{"Slot save path", cfg.SlotSavePath})
+	}
 	if cfg.NoContBatching {
 		rows = append(rows, [2]string{"Continuous batching", "off"})
 	}
@@ -529,6 +692,43 @@ func SummaryRows(cfg model.Config) [][2]string {
 	}
 	if cfg.SWAFull {
 		rows = append(rows, [2]string{"SWA cache", "full"})
+	}
+	if cfg.SWACheckpoints != nil {
+		value := fmt.Sprintf("%d per slot", *cfg.SWACheckpoints)
+		if *cfg.SWACheckpoints == 0 {
+			value = "off"
+		}
+		rows = append(rows, [2]string{"SWA checkpoints", value})
+	}
+	if cfg.CheckpointMinStep != nil {
+		value := fmt.Sprintf("%d tokens", *cfg.CheckpointMinStep)
+		if *cfg.CheckpointMinStep == 0 {
+			value = "no minimum"
+		}
+		rows = append(rows, [2]string{"Checkpoint spacing", value})
+	}
+	if cfg.RopeScaling != "" || cfg.RopeScale > 0 || cfg.YarnOrigCtx > 0 {
+		detail := fallback(cfg.RopeScaling, "model default")
+		if cfg.RopeScale > 0 {
+			detail += fmt.Sprintf(" · scale %.2f", cfg.RopeScale)
+		}
+		if cfg.YarnOrigCtx > 0 {
+			detail += fmt.Sprintf(" · orig ctx %d", cfg.YarnOrigCtx)
+		}
+		rows = append(rows, [2]string{"RoPE scaling", detail})
+	}
+	if cfg.CPUMask != "" || cfg.CPURange != "" {
+		detail := cfg.CPURange
+		if detail == "" {
+			detail = "mask " + cfg.CPUMask
+		}
+		rows = append(rows, [2]string{"CPU affinity", detail})
+	}
+	if cfg.NoRepack {
+		rows = append(rows, [2]string{"Weight repack", "off"})
+	}
+	if cfg.NoWarmup {
+		rows = append(rows, [2]string{"Warmup", "off"})
 	}
 	if moe {
 		switch {

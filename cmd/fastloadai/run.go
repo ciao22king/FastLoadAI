@@ -171,6 +171,9 @@ func commandRun(args []string) int {
 	cfg.CPUThreads = max(1, cfg.CPUThreads)
 	cfg.ContextSize = max(256, cfg.ContextSize)
 	cfg.NGPULayers = max(0, cfg.NGPULayers)
+	if *once {
+		cfg.NoWarmup = true
+	}
 	if err := saveConfig(*configPath, cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "Could not write %s: %v\n", *configPath, err)
 		return 1
