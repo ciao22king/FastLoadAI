@@ -14,7 +14,6 @@ fastloadai-config.json
 .venv/
 venv/
 
-# Packaging build outputs
+# Nix build output
 /result
 /result-*
-*.rpm

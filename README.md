@@ -57,30 +57,6 @@ go build -o fastloadai ./cmd/fastloadai
 ./fastloadai --help
 ```
 
-### Arch Linux (AUR)
-
-The source package is `fastloadai`; `fastloadai-bin` installs the prebuilt
-release binary. Install either with an AUR helper:
-
-```bash
-yay -S fastloadai
-# or, without a Go toolchain:
-yay -S fastloadai-bin
-```
-
-Or build it directly:
-
-```bash
-git clone https://aur.archlinux.org/fastloadai.git
-cd fastloadai
-makepkg -si
-```
-
-The package installs the Go binary. `llama-server` and `llama-quantize` are
-runtime dependencies from `llama.cpp-git` (AUR) or another llama.cpp build on
-`PATH`. The packaging sources live in `packaging/aur/fastloadai` and
-`packaging/aur/fastloadai-bin`.
-
 ### Nix
 
 The repository is a flake:
@@ -94,26 +70,26 @@ nix profile install .#fastloadai
 Inside a checkout, `nix develop` provides Go and `gopls`. The package builds
 with `CGO_ENABLED=0`, so the result is a static binary.
 
-### Fedora / COPR
+### Termux (Android)
 
-The Fedora spec is `packaging/fedora/fastloadai.spec`. It builds from the
-vendored source archive attached to the `v1.1.0` GitHub release, so COPR does
-not need network access for Go modules:
-
-```bash
-rpmbuild -bs packaging/fedora/fastloadai.spec
-```
-
-Upload the resulting source RPM to a COPR project. Once the project is
-enabled:
+The Termux recipe lives in `packaging/termux/fastloadai`. Copy it into a
+`termux-packages` checkout and build it:
 
 ```bash
-sudo dnf copr enable <owner>/fastloadai
-sudo dnf install fastloadai
+cp -a packaging/termux/fastloadai /path/to/termux-packages/packages/
+cd /path/to/termux-packages
+./build-package.sh fastloadai
 ```
 
-`llama-server` and `llama-quantize` must be installed separately; FastLoadAI
-uses whichever build is on `PATH`.
+From a non-Android host, use the Termux Docker wrapper:
+
+```bash
+./scripts/run-docker.sh ./build-package.sh fastloadai
+```
+
+The package depends on `llama-cpp`, which provides `llama-server` and
+`llama-quantize`. It is limited to 64-bit Termux because `llama-cpp` does not
+support 32-bit Android.
 
 ## Quick start
 
