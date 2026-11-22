@@ -3,6 +3,10 @@ set -eu
 
 VERSION=${1:?usage: $0 VERSION [OUTDIR]}
 OUT=${2:-dist}
+case "$OUT" in
+	/*) ;;
+	*) OUT="$PWD/$OUT" ;;
+esac
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
